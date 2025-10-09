@@ -15,35 +15,39 @@ except Exception as e:
 # ----------------------- APP CONFIG -----------------------
 st.set_page_config(page_title="Greeno Big Three v1.2", layout="wide")
 
-# ----------------------- HEADER -----------------------
+## ----------------------- HEADER -----------------------
 logo_path = "greenosu.webp"
 
 if os.path.exists(logo_path):
     with open(logo_path, "rb") as f:
         logo_data = b64encode(f.read()).decode("utf-8")
-    logo_html = f'<img src="data:image/webp;base64,{logo_data}" width="65" style="border-radius:8px;">'
+    # Larger image (95 px wide) and vertically centered
+    logo_html = f'<img src="data:image/webp;base64,{logo_data}" width="95" style="border-radius:12px;">'
 else:
-    logo_html = '<div style="width:65px; height:65px; background:#fff; border-radius:8px;"></div>'
+    logo_html = '<div style="width:95px; height:95px; background:#fff; border-radius:12px;"></div>'
 
 st.markdown(f"""
 <div style="
     background-color:#0078C8;
     color:white;
-    padding:1rem 1.5rem;
+    padding:1.25rem 1.5rem;
     border-radius:8px;
     display:flex;
     align-items:center;
-    gap:1rem;
+    gap:1.5rem;
     box-shadow:0 3px 10px rgba(0,0,0,.15);
 ">
     {logo_html}
-    <div>
-        <h1 style="margin:0; font-size:1.8rem;">Greeno Big Three v1.2</h1>
-        <div style="height:4px; background-color:#F44336; width:160px; margin-top:4px; border-radius:2px;"></div>
-        <p style="margin:6px 0 0; opacity:.9;">Upload your PDF, pick a period column, and extract exactly what you need.</p>
+    <div style="display:flex; flex-direction:column; justify-content:center;">
+        <h1 style="margin:0; font-size:2rem;">Greeno Big Three v1.2</h1>
+        <div style="height:4px; background-color:#F44336; width:180px; margin-top:6px; border-radius:2px;"></div>
+        <p style="margin:8px 0 0; opacity:.9; font-size:1rem;">
+            Upload your PDF, pick a period column, and extract exactly what you need.
+        </p>
     </div>
 </div>
 """, unsafe_allow_html=True)
+
 
 
 # ----------------------- UPLOAD AREA -----------------------

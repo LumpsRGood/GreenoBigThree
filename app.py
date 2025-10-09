@@ -1,4 +1,4 @@
-# app.py — Greeno Big Three v1.4 (Area Director extractor)
+# app.py — Greeno Big Three v1.4.1 (Area Director extractor, anchored to heading)
 
 import io, os, re, base64
 from collections import defaultdict
@@ -12,7 +12,7 @@ except Exception:
     pdfplumber = None
 
 # ───────────────── HEADER / THEME ─────────────────
-st.set_page_config(page_title="Greeno Big Three v1.4", layout="wide")
+st.set_page_config(page_title="Greeno Big Three v1.4.1", layout="wide")
 
 logo_path = "greenosu.webp"  # your local logo
 if os.path.exists(logo_path):
@@ -30,10 +30,10 @@ st.markdown(f"""
 ">
   {logo_html}
   <div style="display:flex; flex-direction:column; justify-content:center;">
-      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.4</h1>
+      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.4.1</h1>
       <div style="height:5px; background-color:#F44336; width:220px; margin-top:10px; border-radius:3px;"></div>
       <p style="margin:10px 0 0; opacity:.9; font-size:1.05rem;">
-        Step 1: Parse the PDF and list every <strong>Area Director</strong>.
+        Step 1 (clean): Parse the PDF and list every <strong>Area Director</strong> correctly.
       </p>
   </div>
 </div>
@@ -43,7 +43,7 @@ st.markdown(f"""
 with st.sidebar:
     st.header("1) Upload PDF")
     up = st.file_uploader("Choose a PDF report", type=["pdf"])
-    st.caption("This step ignores numbers — we just find Area Director names reliably.")
+    st.caption("This step anchors on the “Area Director” heading to find names.")
 
 if not up:
     st.markdown("""
@@ -77,109 +77,133 @@ if pdfplumber is None:
     st.stop()
 
 # ───────────────── PARSING UTILITIES ─────────────────
-HEADINGS = {
-    "Area Director", "Restaurant", "Order Visit Type", "Reason for Contact"
-}
-SECTION_WORDS = {
-    "Delivery", "Dine-In", "To Go", "To-Go", "To-go",
-    "Total", "Delivery Total:", "Dine-In Total:", "To Go Total:", "To-go Total:"
+# Keywords that show up in “reason for contact” or titles — if any token appears, it’s not a name.
+STOP_TOKENS = {
+    "necessary","info","information","compensation","offered","restaurant","operational","issues",
+    "missing","condiments","ingredient","food","bev","beverage","order","wrong","cold","slow",
+    "unfriendly","manager","did","not","attempt","resolve","issue","appearance","packaging","to",
+    "go","to-go","dine-in","delivery","total","guest","ticket","incorrect","understaffed","poor",
+    "quality","presentation","overcooked","burnt","undercooked","host","server","greet","portion"
 }
 
-STORE_LINE_RX = re.compile(r"^\s*\d{4,6}\s*-\s+.*")  # e.g., "5456 - Toledo OH (Talmadge Road)"
+# headings we expect in the left rail
+HEADINGS = {"Area Director","Restaurant","Order Visit Type","Reason for Contact"}
+
+STORE_LINE_RX = re.compile(r"^\s*\d{4,6}\s*-\s+.*")  # "5456 - City (Location)"
 
 def _round_to(x: float, base: int = 2) -> float:
     return round(x / base) * base
 
-def extract_lines(page) -> List[Tuple[float, str]]:
-    """
-    Returns a list of (y_mid, line_text) from top to bottom for one page.
-    Uses pdfplumber.extract_words and groups by y-mid to reconstruct lines.
-    """
-    words = page.extract_words(
+def extract_words(page):
+    return page.extract_words(
         x_tolerance=1.2, y_tolerance=2.2,
         keep_blank_chars=False, use_text_flow=True
     )
+
+def group_lines(words):
+    """
+    Return list of dicts: {"y": y_mid, "x_min": min x0, "text": "joined text"}
+    """
+    from collections import defaultdict
     lines = defaultdict(list)
     for w in words:
         y_mid = _round_to((w["top"] + w["bottom"]) / 2, 2)
         lines[y_mid].append(w)
     out = []
-    for y, items in sorted(lines.items(), key=lambda kv: kv[0]):
-        items = sorted(items, key=lambda w: w["x0"])
-        text = " ".join(it["text"].strip() for it in items if it["text"].strip())
+    for y, ws in sorted(lines.items(), key=lambda kv: kv[0]):
+        ws = sorted(ws, key=lambda w: w["x0"])
+        text = " ".join(w["text"].strip() for w in ws if w["text"].strip())
         if text:
-            out.append((y, text))
+            out.append({"y": y, "x_min": ws[0]["x0"], "text": text})
     return out
 
-def is_heading_or_section(s: str) -> bool:
+def looks_like_name(s: str) -> bool:
+    """
+    Stricter rule set:
+      - 2–4 tokens
+      - Each token starts with A–Z and is alphabetic/apostrophe/hyphen only
+      - No digits, no parentheses/hyphens that indicate titles/locations
+      - None of the STOP_TOKENS present (case-insensitive)
+    """
     s_clean = s.strip()
+    if STORE_LINE_RX.match(s_clean):
+        return False
     if s_clean in HEADINGS:
-        return True
-    # Normalize basic "To-go" variants
-    norm = s_clean.replace("—", "-").replace("–", "-")
-    if norm in SECTION_WORDS:
-        return True
-    if norm.endswith(" Total:"):
-        return True
-    return False
+        return False
+    if any(ch.isdigit() for ch in s_clean):
+        return False
+    if "(" in s_clean or ")" in s_clean or " - " in s_clean or "—" in s_clean or "–" in s_clean:
+        return False
 
-def is_probable_name(s: str) -> bool:
-    """
-    Heuristic for a personal name: 2–4 words, starts with capital letters,
-    not a store line, not a heading/section.
-    """
-    if STORE_LINE_RX.match(s):
+    parts = [p for p in re.split(r"\s+", s_clean) if p]
+    if len(parts) < 2 or len(parts) > 4:
         return False
-    if is_heading_or_section(s):
-        return False
-    parts = [p for p in re.split(r"\s+", s.strip()) if p]
-    if len(parts) < 2 or len(parts) > 5:
-        return False
-    # At least two parts should start with capital A-Z
-    caps = sum(1 for p in parts if re.match(r"^[A-Z][a-zA-Z'\-]+$", p))
-    return caps >= 2
 
-def find_area_directors_from_lines(lines: List[Tuple[float, str]]) -> List[str]:
+    for p in parts:
+        if not re.match(r"^[A-Z][a-zA-Z'\-]+$", p):
+            return False
+
+    toks = {t.lower() for t in re.split(r"[^\w]+", s_clean) if t}
+    if toks & STOP_TOKENS:
+        return False
+
+    return True
+
+def find_area_directors_on_page(lines: List[dict]) -> List[str]:
     """
+    Anchor on the 'Area Director' heading.
     Strategy:
-      - Identify store lines "#### - City (Location)".
-      - For each store line, look backward to the nearest previous non-empty line
-        that looks like a person's name (and isn't a heading/section).
-      - Deduplicate while preserving first-seen order.
+      - Find any line whose text == 'Area Director' (case-insensitive).
+      - Take the next 1–5 lines; the first that looks_like_name() AND is left-aligned
+        (x close to the page's left margin) is the Area Director for this page.
+      - Fallback: if no heading anchor is found, use the first candidate above the
+        first store line (but still apply strict rules).
     """
-    names_found: List[str] = []
-    seen = set()
+    names = []
 
-    for idx, (_, txt) in enumerate(lines):
-        if STORE_LINE_RX.match(txt):
-            # walk upward to find the closest plausible name
-            j = idx - 1
-            while j >= 0:
-                s = lines[j][1].strip()
-                if s and not is_heading_or_section(s):
-                    if is_probable_name(s):
-                        if s not in seen:
-                            seen.add(s)
-                            names_found.append(s)
-                        break
-                j -= 1
-    return names_found
+    # Estimate left margin from the smallest x_min on page
+    left_margin = min(l["x_min"] for l in lines) if lines else 0.0
+
+    def is_left_aligned(x):
+        return (x - left_margin) <= 20  # within ~20 px of left margin
+
+    # 1) Anchor path
+    idxs = [i for i, L in enumerate(lines) if L["text"].strip().lower() == "area director"]
+    for i in idxs:
+        for j in range(i+1, min(i+6, len(lines))):
+            cand = lines[j]
+            if looks_like_name(cand["text"]) and is_left_aligned(cand["x_min"]):
+                names.append(cand["text"].strip())
+                break  # one per anchor occurrence
+
+    # 2) Fallback path (once per page): name above first store line
+    if not names:
+        first_store_idx = next((k for k, L in enumerate(lines) if STORE_LINE_RX.match(L["text"])), None)
+        if first_store_idx is not None:
+            for j in range(first_store_idx-1, max(first_store_idx-6, -1), -1):
+                cand = lines[j]
+                if looks_like_name(cand["text"]) and is_left_aligned(cand["x_min"]):
+                    names.append(cand["text"].strip())
+                    break
+
+    return names
 
 # ───────────────── RUN PARSER ─────────────────
 with st.spinner("Scanning pages for Area Director names…"):
-    all_lines_by_page: List[List[Tuple[float, str]]] = []
+    all_lines_by_page: List[List[dict]] = []
     names: List[str] = []
     try:
         with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
             for p in pdf.pages:
-                lines = extract_lines(p)
+                words = extract_words(p)
+                lines = group_lines(words)
                 all_lines_by_page.append(lines)
-                names.extend(find_area_directors_from_lines(lines))
+                names.extend(find_area_directors_on_page(lines))
     except Exception as e:
         st.error(f"Failed to read PDF: {e}")
         st.stop()
 
-# Deduplicate while preserving order (in case names repeat across pages)
+# Deduplicate while preserving order
 seen = set()
 names_unique = []
 for n in names:
@@ -195,7 +219,7 @@ if names_unique:
     for n in names_unique:
         st.markdown(f"- **{n}**")
 else:
-    st.warning("No Area Director names were detected. Expand the debug view below to inspect raw lines.")
+    st.warning("No Area Director names were detected. Expand the debug view to inspect the raw lines.")
 
 # Quick copy + export
 copy_text = "\n".join(names_unique)
@@ -208,7 +232,6 @@ with c1:
     st.download_button("📥 Download CSV", data=csv, file_name="area_directors.csv", mime="text/csv")
 with c2:
     import io as _io
-    from pandas import ExcelWriter
     buff = _io.BytesIO()
     with pd.ExcelWriter(buff, engine="openpyxl") as writer:
         df_names.to_excel(writer, index=False, sheet_name="Area Directors")
@@ -217,9 +240,10 @@ with c2:
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 # ───────────────── DEBUG ─────────────────
-with st.expander("🔎 Debug: view raw lines per page"):
+with st.expander("🔎 Debug: raw lines per page (y, x_min, text)"):
     st.caption("If a name is missing/wrong, check how the PDF text is being read here.")
-    pg = st.number_input("Page to preview", min_value=1, max_value=len(all_lines_by_page), value=1, step=1)
-    lines_preview = all_lines_by_page[pg-1]
-    st.write(pd.DataFrame([{"y": y, "text": t} for y, t in lines_preview]))
-    st.caption("Tip: The parser looks for a store line like '5456 - City' and takes the nearest line above it that looks like a person’s name.")
+    page_num = st.number_input("Page to preview", min_value=1, max_value=len(all_lines_by_page), value=1, step=1)
+    lines_preview = all_lines_by_page[page_num-1]
+    st.dataframe(pd.DataFrame(lines_preview))
+    st.caption("Parser rule: take the first left-aligned line AFTER 'Area Director' that looks like a name. "
+               "Fallback: first name-like line immediately above the first store line on that page.")

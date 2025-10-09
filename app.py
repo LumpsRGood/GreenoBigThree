@@ -1,4 +1,4 @@
-# Greeno Big Three v1.5.5 — strict labels + TOTAL-aware column bins (To Go & Delivery)
+# Greeno Big Three v1.5.6 — strict labels (from left label area) + TOTAL-aware column bins
 import io, os, re, base64, statistics
 from collections import defaultdict
 from typing import Dict, List, Tuple, Optional
@@ -11,7 +11,7 @@ except Exception:
     pdfplumber = None
 
 # ───────────────── HEADER / THEME ─────────────────
-st.set_page_config(page_title="Greeno Big Three v1.5.5", layout="wide")
+st.set_page_config(page_title="Greeno Big Three v1.5.6", layout="wide")
 
 logo_path = "greenosu.webp"
 if os.path.exists(logo_path):
@@ -29,10 +29,10 @@ st.markdown(f"""
 ">
   {logo_html}
   <div style="display:flex; flex-direction:column; justify-content:center;">
-      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.5.5</h1>
+      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.5.6</h1>
       <div style="height:5px; background-color:#F44336; width:300px; margin-top:10px; border-radius:3px;"></div>
       <p style="margin:10px 0 0; opacity:.9; font-size:1.05rem;">
-        Strict 7-label mapping + precise period bins using the TOTAL column as right boundary.
+        Strict 7-label mapping from the left label area + precise period bins using the TOTAL column.
       </p>
   </div>
 </div>
@@ -42,7 +42,7 @@ st.markdown(f"""
 with st.sidebar:
     st.header("1) Upload PDF")
     up = st.file_uploader("Choose the PDF report", type=["pdf"])
-    st.caption("We detect P# YY headers, build precise column bins (aware of TOTAL), and read To-Go & Delivery only.")
+    st.caption("Parses To-Go & Delivery only; matches labels strictly from left side of each row.")
 
 if not up:
     st.markdown("""
@@ -77,13 +77,12 @@ if pdfplumber is None:
 
 # ───────────────── CONSTANTS ─────────────────
 HEADINGS = {"Area Director", "Restaurant", "Order Visit Type", "Reason for Contact"}
-STORE_LINE_RX = re.compile(r"^\s*\d{3,6}\s*-\s+.*")  # e.g., "5456 - City (Location)" or "0406 - City"
+STORE_LINE_RX = re.compile(r"^\s*\d{3,6}\s*-\s+.*")  # "5456 - City" or "0406 - City"
 SECTION_TOGO   = re.compile(r"^\s*(To[\s-]?Go|To-go)\s*$", re.IGNORECASE)
 SECTION_DELIV  = re.compile(r"^\s*Delivery\s*$", re.IGNORECASE)
 SECTION_DINEIN = re.compile(r"^\s*Dine[\s-]?In\s*$", re.IGNORECASE)
 HEADER_RX = re.compile(r"\bP(?:1[0-2]|[1-9])\s+(?:2[0-9])\b")
 
-# Canonical reasons (strict mapping, via exact aliases)
 CANONICAL = [
     "Missing food",
     "Order wrong",
@@ -294,6 +293,10 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes):
             carry_total_x = total_x
             header_bins = build_header_bins({h: header_positions[h] for h in ordered_headers}, total_x)
 
+            # label area (everything left of the first period)
+            first_period_x = min(header_positions[h] for h in ordered_headers)
+            label_right_edge = first_period_x - 12  # small padding
+
             lines = extract_words_grouped(page)
             if not lines:
                 continue
@@ -331,18 +334,22 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes):
                 if not (current_ad and current_store and current_section in {"To Go","Delivery"}):
                     continue
 
-                # STRICT reason match (only your 7 exact aliases)
-                canon = normalize_reason(txt)
+                # --- NEW: extract LEFT-SIDE LABEL ONLY for matching ---
+                label_tokens = [w["text"].strip() for w in L["words"] if w["x1"] <= label_right_edge]
+                label_text = " ".join(t for t in label_tokens if t)
+                canon = normalize_reason(label_text)
                 if not canon:
                     continue
 
-                # Accumulate numbers that land inside a period bin (ignore TOTAL/whitespace)
+                # Accumulate numbers under period bins (ignore TOTAL/whitespace)
                 sect = data[current_ad].setdefault(current_store, {}).setdefault(current_section, {})
                 per_header = sect.setdefault("__all__", defaultdict(lambda: defaultdict(int)))
                 for w in L["words"]:
                     token = w["text"].strip()
                     if not re.fullmatch(r"-?\d+", token):
                         continue
+                    if w["x0"] <= label_right_edge:
+                        continue  # ignore any numbers that happen to be in the label area
                     xmid = (w["x0"] + w["x1"]) / 2
                     mapped = map_x_to_header(header_bins, xmid)
                     if mapped is None:
@@ -401,7 +408,7 @@ df_detail = df.merge(store_totals, on=["Area Director","Store"], how="left") \
               .merge(ad_totals, on="Area Director", how="left")
 
 # ───────────────── DISPLAY ─────────────────
-st.success("✅ Parsed with strict labels & TOTAL-aware bins.")
+st.success("✅ Parsed with strict labels from left label area & TOTAL-aware bins.")
 st.subheader(f"Results for period: {sel_col}")
 
 ads = df_detail["Area Director"].dropna().unique().tolist()

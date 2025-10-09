@@ -16,7 +16,14 @@ except Exception as e:
 st.set_page_config(page_title="Greeno Big Three v1.2", layout="wide")
 
 # ----------------------- HEADER -----------------------
-logo_url = "https://upload.wikimedia.org/wikipedia/en/3/3e/Brutus_Buckeye_logo.svg"
+logo_path = "greenosu.webp"
+
+if os.path.exists(logo_path):
+    with open(logo_path, "rb") as f:
+        logo_data = b64encode(f.read()).decode("utf-8")
+    logo_html = f'<img src="data:image/webp;base64,{logo_data}" width="65" style="border-radius:8px;">'
+else:
+    logo_html = '<div style="width:65px; height:65px; background:#fff; border-radius:8px;"></div>'
 
 st.markdown(f"""
 <div style="
@@ -29,7 +36,7 @@ st.markdown(f"""
     gap:1rem;
     box-shadow:0 3px 10px rgba(0,0,0,.15);
 ">
-    <img src="{logo_url}" width="65" style="border-radius:50%; background:white; padding:6px;">
+    {logo_html}
     <div>
         <h1 style="margin:0; font-size:1.8rem;">Greeno Big Three v1.2</h1>
         <div style="height:4px; background-color:#F44336; width:160px; margin-top:4px; border-radius:2px;"></div>
@@ -37,6 +44,7 @@ st.markdown(f"""
     </div>
 </div>
 """, unsafe_allow_html=True)
+
 
 # ----------------------- UPLOAD AREA -----------------------
 with st.sidebar:

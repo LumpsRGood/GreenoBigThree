@@ -22,7 +22,7 @@ if os.path.exists(logo_path):
     with open(logo_path, "rb") as f:
         logo_data = b64encode(f.read()).decode("utf-8")
     # Larger image (95 px wide) and vertically centered
-    logo_html = f'<img src="data:image/webp;base64,{logo_data}" width="140" style="border-radius:12px;">'
+    logo_html = f'<img src="data:image/webp;base64,{logo_data}" width="240" style="border-radius:12px;">'
 else:
     logo_html = '<div style="width:95px; height:95px; background:#fff; border-radius:12px;"></div>'
 

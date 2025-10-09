@@ -1,4 +1,4 @@
-# Greeno Big Three v1.5.2 — AD → Store → (To Go, Delivery) → 7 reasons per period
+# Greeno Big Three v1.5.3 — strict mapping for To Go & Delivery (7 reasons) per period
 import io, os, re, base64
 from collections import defaultdict
 from typing import Dict, List, Tuple, Optional
@@ -11,7 +11,7 @@ except Exception:
     pdfplumber = None
 
 # ───────────────── HEADER / THEME ─────────────────
-st.set_page_config(page_title="Greeno Big Three v1.5.2", layout="wide")
+st.set_page_config(page_title="Greeno Big Three v1.5.3", layout="wide")
 
 logo_path = "greenosu.webp"
 if os.path.exists(logo_path):
@@ -29,10 +29,10 @@ st.markdown(f"""
 ">
   {logo_html}
   <div style="display:flex; flex-direction:column; justify-content:center;">
-      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.5.2</h1>
+      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.5.3</h1>
       <div style="height:5px; background-color:#F44336; width:260px; margin-top:10px; border-radius:3px;"></div>
       <p style="margin:10px 0 0; opacity:.9; font-size:1.05rem;">
-        Per-store attribution fixed: each store maps to the nearest Area Director above it.
+        Strict label mapping: counts only exact 7 reasons in <strong>To Go</strong> & <strong>Delivery</strong>.
       </p>
   </div>
 </div>
@@ -42,7 +42,7 @@ st.markdown(f"""
 with st.sidebar:
     st.header("1) Upload PDF")
     up = st.file_uploader("Choose the PDF report", type=["pdf"])
-    st.caption("Finds headers like ‘P9 24’, maps numbers by x-position, and reads To-Go & Delivery only.")
+    st.caption("Looks for headers like ‘P9 24’, ‘P1 25’ and maps numbers by x-position.")
 
 if not up:
     st.markdown("""
@@ -77,12 +77,13 @@ if pdfplumber is None:
 
 # ───────────────── CONSTANTS ─────────────────
 HEADINGS = {"Area Director", "Restaurant", "Order Visit Type", "Reason for Contact"}
-STORE_LINE_RX = re.compile(r"^\s*\d{3,6}\s*-\s+.*")  # e.g., "5456 - City (Location)" or "0406 - City"
+STORE_LINE_RX = re.compile(r"^\s*\d{3,6}\s*-\s+.*")  # "5456 - City" or "0406 - City"
 SECTION_TOGO   = re.compile(r"^\s*(To[\s-]?Go|To-go)\s*$", re.IGNORECASE)
 SECTION_DELIV  = re.compile(r"^\s*Delivery\s*$", re.IGNORECASE)
 SECTION_DINEIN = re.compile(r"^\s*Dine[\s-]?In\s*$", re.IGNORECASE)
 HEADER_RX = re.compile(r"\bP(?:1[0-2]|[1-9])\s+(?:2[0-9])\b")
 
+# Canonical reasons + exact aliases (STRICT)
 CANONICAL = [
     "Missing food",
     "Order wrong",
@@ -92,24 +93,60 @@ CANONICAL = [
     "Missing ingredients",
     "Packaging to-go complaint",
 ]
-REASON_PATTERNS = {
-    "Missing food":              [re.compile(r"\bMissing (Item )?\(?Food\)?\b", re.IGNORECASE)],
-    "Order wrong":               [re.compile(r"\bOrder wrong\b", re.IGNORECASE)],
-    "Missing condiments":        [re.compile(r"\bMissing Condiment(s)?\b", re.IGNORECASE)],
-    "Out of menu item":          [re.compile(r"\bOut Of Menu Item\b", re.IGNORECASE)],
-    "Missing bev":               [re.compile(r"\bMissing (Item )?\(?Bev\)?\b", re.IGNORECASE),
-                                  re.compile(r"\bMissing (Beverage|Drink)\b", re.IGNORECASE)],
-    "Missing ingredients":       [re.compile(r"\bMissing Ingredient(s)?\b", re.IGNORECASE)],
-    "Packaging to-go complaint": [re.compile(r"\bPackaging (To[\s-]?Go|to-go) Complaint\b", re.IGNORECASE)],
+
+def _norm(s: str) -> str:
+    # normalize text for strict compare
+    return re.sub(r"[^a-z0-9]+", " ", s.lower()).strip()
+
+# exact aliases → canonical (normalized keys)
+REASON_ALIASES_NORM = {
+    _norm("Missing Item (Food)"):        "Missing food",
+    _norm("Missing Food"):               "Missing food",
+
+    _norm("Order wrong"):                "Order wrong",
+
+    _norm("Missing Condiments"):         "Missing condiments",
+
+    _norm("Out Of Menu Item"):           "Out of menu item",
+    _norm("Out of menu item"):           "Out of menu item",
+
+    _norm("Missing Item (Bev)"):         "Missing bev",
+    _norm("Missing Bev"):                "Missing bev",
+    _norm("Missing Beverage"):           "Missing bev",
+    _norm("Missing Drink"):              "Missing bev",
+
+    _norm("Missing Ingredient (Food)"):  "Missing ingredients",
+    _norm("Missing Ingredients"):        "Missing ingredients",
+
+    _norm("Packaging To Go Complaint"):  "Packaging to-go complaint",
+    _norm("Packaging To-Go Complaint"):  "Packaging to-go complaint",
+    _norm("Packaging to-go complaint"):  "Packaging to-go complaint",
 }
 
-def normalize_reason(raw: str) -> Optional[str]:
-    s = raw.strip()
-    for canon, patterns in REASON_PATTERNS.items():
-        for rx in patterns:
-            if rx.search(s):
-                return canon
+# safe fallback patterns (used only if strict alias fails)
+REASON_FALLBACK_RX = {
+    "Missing food":              re.compile(r"^\s*Missing (Item )?\(?Food\)?\s*$", re.IGNORECASE),
+    "Order wrong":               re.compile(r"^\s*Order wrong\s*$", re.IGNORECASE),
+    "Missing condiments":        re.compile(r"^\s*Missing Condiments?\s*$", re.IGNORECASE),
+    "Out of menu item":          re.compile(r"^\s*Out Of Menu Item\s*$", re.IGNORECASE),
+    "Missing bev":               re.compile(r"^\s*Missing (Item )?\(?Bev(erage)?|Drink\)?\s*$", re.IGNORECASE),
+    "Missing ingredients":       re.compile(r"^\s*Missing Ingredients?\s*(\(Food\))?\s*$", re.IGNORECASE),
+    "Packaging to-go complaint": re.compile(r"^\s*Packaging (To[\s-]?Go|to-go) Complaint\s*$", re.IGNORECASE),
+}
+
+def normalize_reason_strict(raw: str) -> Optional[str]:
+    key = _norm(raw)
+    return REASON_ALIASES_NORM.get(key)
+
+def normalize_reason_safe(raw: str) -> Optional[str]:
+    for canon, rx in REASON_FALLBACK_RX.items():
+        if rx.search(raw):
+            return canon
     return None
+
+def normalize_reason(raw: str) -> Optional[str]:
+    # STRICT first; fallback only if needed
+    return normalize_reason_strict(raw) or normalize_reason_safe(raw)
 
 def _round_to(x: float, base: int = 2) -> float:
     return round(x / base) * base
@@ -202,7 +239,6 @@ def find_ad_for_store(lines: List[dict], store_idx: int, left_margin: float, bac
         s = cand["text"].strip()
         if is_left_aligned(cand["x_min"]) and looks_like_name(s):
             return s
-    # broader fallback: scan farther up if needed
     for j in range(store_idx - back_limit - 1, -1, -1):
         cand = lines[j]
         s = cand["text"].strip()
@@ -217,7 +253,7 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes):
       header_positions: {header -> x_center}
       data: {AD: {Store: {Section: {"__all__": {Reason: {Header: int}}}}}}
       ordered_headers: [headers...]
-      pairs_debug: list of (AD, Store) seen (for troubleshooting)
+      pairs_debug: list of (AD, Store)
     """
     header_positions: Dict[str, float] = {}
     ordered_headers: List[str] = []
@@ -249,11 +285,10 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes):
             current_store: Optional[str] = None
             current_section: Optional[str] = None
 
-            # Iterate lines top→bottom; AD is decided PER STORE by scanning above it
             for idx, L in enumerate(lines):
                 txt = L["text"].strip()
 
-                # Store detection
+                # Store detection → resolve AD per store (look upward)
                 if STORE_LINE_RX.match(txt):
                     ad_for_this_store = find_ad_for_store(lines, idx, left_margin)
                     if ad_for_this_store:
@@ -275,11 +310,10 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes):
                 # Skip headings
                 if txt in HEADINGS:
                     continue
-
-                # Must have AD + Store + (To Go/Delivery)
                 if not (current_ad and current_store and current_section in {"To Go","Delivery"}):
                     continue
 
+                # Strict reason match
                 canon = normalize_reason(txt)
                 if not canon:
                     continue
@@ -289,7 +323,7 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes):
                 per_header = sect.setdefault("__all__", defaultdict(lambda: defaultdict(int)))
                 for w in L["words"]:
                     token = w["text"].strip()
-                    if not re.fullmatch(r"-?\d+", token): 
+                    if not re.fullmatch(r"-?\d+", token):
                         continue
                     xmid = (w["x0"] + w["x1"]) / 2
                     nearest_header = min(header_positions.items(), key=lambda kv: abs(kv[1] - xmid))[0]
@@ -346,7 +380,7 @@ df_detail = df.merge(store_totals, on=["Area Director","Store"], how="left") \
               .merge(ad_totals, on="Area Director", how="left")
 
 # ───────────────── DISPLAY ─────────────────
-st.success("✅ Parsed successfully.")
+st.success("✅ Parsed with strict mapping.")
 st.subheader(f"Results for period: {sel_col}")
 
 ads = df_detail["Area Director"].dropna().unique().tolist()
@@ -365,6 +399,26 @@ for ad in ads:
         pivot["Total"] = pivot.sum(axis=1)
         st.dataframe(pivot, use_container_width=True)
 
+# ───────────────── DRILL-DOWN / EVIDENCE ─────────────────
+with st.expander("🔎 Drill-down: show exact values per header for any AD & Store"):
+    if raw_data:
+        ad_pick = st.selectbox("Area Director", sorted(raw_data.keys()))
+        store_pick = st.selectbox("Store", sorted(raw_data[ad_pick].keys()))
+        sec_pick = st.radio("Section", ["To Go", "Delivery"], horizontal=True)
+
+        per = raw_data[ad_pick][store_pick].get(sec_pick, {}).get("__all__", {})
+        mat = []
+        for r in CANONICAL:
+            row = {"Reason": r}
+            for h in ordered_headers:
+                row[h] = int(per.get(r, {}).get(h, 0))
+            mat.append(row)
+        df_mat = pd.DataFrame(mat).set_index("Reason")
+        st.dataframe(df_mat, use_container_width=True)
+        st.caption("Use this to verify that the selected period’s column (above) matches what’s in the PDF for these rows.")
+    else:
+        st.caption("No data parsed.")
+
 # ───────────────── EXPORTS ─────────────────
 st.header("3) Export results")
 csv = df_detail.to_csv(index=False)
@@ -380,7 +434,7 @@ st.download_button("📥 Download Excel (Detail + Totals)", data=buff.getvalue()
                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 # ───────────────── DEBUG / VERIFICATION ─────────────────
-with st.expander("🔎 Debug: AD ↔ Store pairs detected this run"):
+with st.expander("🧪 Debug: AD ↔ Store pairs detected this run"):
     if pairs_debug:
         st.dataframe(pd.DataFrame(pairs_debug, columns=["Area Director","Store"]))
     else:

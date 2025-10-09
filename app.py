@@ -1,4 +1,4 @@
-# Greeno Big Three v1.5.6 — strict labels (from left label area) + TOTAL-aware column bins
+# Greeno Big Three v1.5.7 — strict labels from left label area + TOTAL-aware bins + reason totals
 import io, os, re, base64, statistics
 from collections import defaultdict
 from typing import Dict, List, Tuple, Optional
@@ -11,7 +11,7 @@ except Exception:
     pdfplumber = None
 
 # ───────────────── HEADER / THEME ─────────────────
-st.set_page_config(page_title="Greeno Big Three v1.5.6", layout="wide")
+st.set_page_config(page_title="Greeno Big Three v1.5.7", layout="wide")
 
 logo_path = "greenosu.webp"
 if os.path.exists(logo_path):
@@ -29,7 +29,7 @@ st.markdown(f"""
 ">
   {logo_html}
   <div style="display:flex; flex-direction:column; justify-content:center;">
-      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.5.6</h1>
+      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.5.7</h1>
       <div style="height:5px; background-color:#F44336; width:300px; margin-top:10px; border-radius:3px;"></div>
       <p style="margin:10px 0 0; opacity:.9; font-size:1.05rem;">
         Strict 7-label mapping from the left label area + precise period bins using the TOTAL column.
@@ -77,11 +77,11 @@ if pdfplumber is None:
 
 # ───────────────── CONSTANTS ─────────────────
 HEADINGS = {"Area Director", "Restaurant", "Order Visit Type", "Reason for Contact"}
-STORE_LINE_RX = re.compile(r"^\s*\d{3,6}\s*-\s+.*")  # "5456 - City" or "0406 - City"
+STORE_LINE_RX  = re.compile(r"^\s*\d{3,6}\s*-\s+.*")  # "5456 - City" or "0406 - City"
 SECTION_TOGO   = re.compile(r"^\s*(To[\s-]?Go|To-go)\s*$", re.IGNORECASE)
 SECTION_DELIV  = re.compile(r"^\s*Delivery\s*$", re.IGNORECASE)
 SECTION_DINEIN = re.compile(r"^\s*Dine[\s-]?In\s*$", re.IGNORECASE)
-HEADER_RX = re.compile(r"\bP(?:1[0-2]|[1-9])\s+(?:2[0-9])\b")
+HEADER_RX      = re.compile(r"\bP(?:1[0-2]|[1-9])\s+(?:2[0-9])\b")
 
 CANONICAL = [
     "Missing food",
@@ -96,7 +96,7 @@ CANONICAL = [
 def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", s.lower()).strip()
 
-# EXACT aliases only (normalized) → canonical
+# Exact aliases → canonical (strict)
 REASON_ALIASES_NORM = {
     _norm("Missing Item (Food)"):        "Missing food",
     _norm("Order Wrong"):                "Order wrong",
@@ -334,7 +334,7 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes):
                 if not (current_ad and current_store and current_section in {"To Go","Delivery"}):
                     continue
 
-                # --- NEW: extract LEFT-SIDE LABEL ONLY for matching ---
+                # LEFT-SIDE LABEL ONLY (strict alias match)
                 label_tokens = [w["text"].strip() for w in L["words"] if w["x1"] <= label_right_edge]
                 label_text = " ".join(t for t in label_tokens if t)
                 canon = normalize_reason(label_text)
@@ -349,7 +349,7 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes):
                     if not re.fullmatch(r"-?\d+", token):
                         continue
                     if w["x0"] <= label_right_edge:
-                        continue  # ignore any numbers that happen to be in the label area
+                        continue  # ignore any digits in the label area
                     xmid = (w["x0"] + w["x1"]) / 2
                     mapped = map_x_to_header(header_bins, xmid)
                     if mapped is None:
@@ -396,6 +396,36 @@ if df.empty:
     st.warning("No matching To Go/Delivery reasons found for the selected period.")
     st.stop()
 
+# ---- Reason totals (copy-friendly) ----
+def _order_series(s: pd.Series) -> pd.Series:
+    return s.reindex(CANONICAL)
+
+tot_to_go = (
+    df[df["Section"] == "To Go"]
+      .groupby("Reason", as_index=True)["Value"]
+      .sum()
+      .astype(int)
+)
+tot_delivery = (
+    df[df["Section"] == "Delivery"]
+      .groupby("Reason", as_index=True)["Value"]
+      .sum()
+      .astype(int)
+)
+tot_overall = (
+    df.groupby("Reason", as_index=True)["Value"]
+      .sum()
+      .astype(int)
+)
+
+reason_totals = pd.DataFrame({
+    "To Go": _order_series(tot_to_go),
+    "Delivery": _order_series(tot_delivery),
+    "Total": _order_series(tot_overall),
+}).fillna(0).astype(int)
+reason_totals.loc["— Grand Total —"] = reason_totals.sum(numeric_only=True)
+
+# Store & AD totals for detail views
 store_totals = (
     df.groupby(["Area Director","Store"], as_index=False)["Value"].sum()
       .rename(columns={"Value":"Store Total"})
@@ -408,7 +438,7 @@ df_detail = df.merge(store_totals, on=["Area Director","Store"], how="left") \
               .merge(ad_totals, on="Area Director", how="left")
 
 # ───────────────── DISPLAY ─────────────────
-st.success("✅ Parsed with strict labels from left label area & TOTAL-aware bins.")
+st.success("✅ Parsed with strict labels & TOTAL-aware bins.")
 st.subheader(f"Results for period: {sel_col}")
 
 ads = df_detail["Area Director"].dropna().unique().tolist()
@@ -426,6 +456,11 @@ for ad in ads:
         )
         pivot["Total"] = pivot.sum(axis=1)
         st.dataframe(pivot, use_container_width=True)
+
+# ───────────────── REASON TOTALS (copy-friendly) ─────────────────
+st.header("4) Reason totals (selected period)")
+st.caption("Use this table to copy values into your spreadsheet (e.g., your new P9 column).")
+st.dataframe(reason_totals, use_container_width=True)
 
 # ───────────────── DRILL-DOWN / EVIDENCE ─────────────────
 with st.expander("🔎 Drill-down: show exact values per header for any AD & Store"):
@@ -448,18 +483,32 @@ with st.expander("🔎 Drill-down: show exact values per header for any AD & Sto
         st.caption("No data parsed.")
 
 # ───────────────── EXPORTS ─────────────────
-st.header("3) Export results")
+st.header("5) Export results")
 csv = df_detail.to_csv(index=False)
 st.download_button("📥 Download detail CSV", data=csv, file_name=f"ad_store_detail_{sel_col.replace(' ','_')}.csv", mime="text/csv")
 
+# Excel with all sheets including Reason Totals
 buff = io.BytesIO()
 with pd.ExcelWriter(buff, engine="openpyxl") as writer:
     df_detail.to_excel(writer, index=False, sheet_name="Detail")
     store_totals.to_excel(writer, index=False, sheet_name="Store Totals")
     ad_totals.to_excel(writer, index=False, sheet_name="AD Totals")
-st.download_button("📥 Download Excel (Detail + Totals)", data=buff.getvalue(),
-                   file_name=f"ad_store_{sel_col.replace(' ','_')}.xlsx",
-                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    reason_totals.to_excel(writer, sheet_name="Reason Totals")
+st.download_button(
+    "📥 Download Excel (Detail + Totals + Reason Totals)",
+    data=buff.getvalue(),
+    file_name=f"ad_store_{sel_col.replace(' ','_')}.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
+
+# CSV just for Reason Totals (quick paste into your sheet)
+rt_csv = reason_totals.to_csv()
+st.download_button(
+    "📥 Download reason totals CSV (selected period)",
+    data=rt_csv,
+    file_name=f"reason_totals_{sel_col.replace(' ','_')}.csv",
+    mime="text/csv"
+)
 
 # ───────────────── DEBUG / VERIFICATION ─────────────────
 with st.expander("🧪 Debug: AD ↔ Store pairs detected this run"):

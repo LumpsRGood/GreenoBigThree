@@ -1,4 +1,4 @@
-# Greeno Big Three v1.5.8 — baseline v1.5.7 + collapsible AD sections (expand on demand)
+# Greeno Big Three v1.6.0 — v1.5.8 baseline + Eric-style email generator with embedded charts
 import io, os, re, base64, statistics
 from collections import defaultdict
 from typing import Dict, List, Tuple, Optional
@@ -10,8 +10,13 @@ try:
 except Exception:
     pdfplumber = None
 
+# NEW: plotting
+import matplotlib
+matplotlib.use("Agg")  # headless
+import matplotlib.pyplot as plt
+
 # ───────────────── HEADER / THEME ─────────────────
-st.set_page_config(page_title="Greeno Big Three v1.5.8", layout="wide")
+st.set_page_config(page_title="Greeno Big Three v1.6.0", layout="wide")
 
 logo_path = "greenosu.webp"
 if os.path.exists(logo_path):
@@ -29,10 +34,10 @@ st.markdown(f"""
 ">
   {logo_html}
   <div style="display:flex; flex-direction:column; justify-content:center;">
-      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.5.8</h1>
+      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.6.0</h1>
       <div style="height:5px; background-color:#F44336; width:300px; margin-top:10px; border-radius:3px;"></div>
       <p style="margin:10px 0 0; opacity:.9; font-size:1.05rem;">
-        Baseline locked (strict 7-labels + TOTAL-aware bins) with collapsible Area Director details.
+        Baseline locked (strict 7-labels + TOTAL-aware bins) + Eric-style email generator with embedded charts.
       </p>
   </div>
 </div>
@@ -77,7 +82,7 @@ if pdfplumber is None:
 
 # ───────────────── CONSTANTS ─────────────────
 HEADINGS = {"Area Director", "Restaurant", "Order Visit Type", "Reason for Contact"}
-STORE_LINE_RX  = re.compile(r"^\s*\d{3,6}\s*-\s+.*")  # "5456 - City" or "0406 - City"
+STORE_LINE_RX  = re.compile(r"^\s*\d{3,6}\s*-\s+.*")
 SECTION_TOGO   = re.compile(r"^\s*(To[\s-]?Go|To-go)\s*$", re.IGNORECASE)
 SECTION_DELIV  = re.compile(r"^\s*Delivery\s*$", re.IGNORECASE)
 SECTION_DINEIN = re.compile(r"^\s*Dine[\s-]?In\s*$", re.IGNORECASE)
@@ -96,7 +101,6 @@ CANONICAL = [
 def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", s.lower()).strip()
 
-# Exact aliases → canonical (strict)
 REASON_ALIASES_NORM = {
     _norm("Missing Item (Food)"):        "Missing food",
     _norm("Order Wrong"):                "Order wrong",
@@ -141,7 +145,6 @@ def looks_like_name(s: str) -> bool:
 
 # ───────────────── HEADER HELPERS ─────────────────
 def find_period_headers(page) -> List[Tuple[str, float, float]]:
-    """Find 'P# YY' headers; return list of (text, x_center, y_mid)."""
     words = page.extract_words(x_tolerance=1.0, y_tolerance=2.0, keep_blank_chars=False, use_text_flow=True)
     lines = defaultdict(list)
     for w in words:
@@ -178,11 +181,7 @@ def sort_headers(headers: List[str]) -> List[str]:
     return sorted(headers, key=key)
 
 def find_total_header_x(page, header_y: float) -> Optional[float]:
-    """x-center of 'Total' on the header line, if present."""
-    words = page.extract_words(
-        x_tolerance=1.0, y_tolerance=2.0,
-        keep_blank_chars=False, use_text_flow=True
-    )
+    words = page.extract_words(x_tolerance=1.0, y_tolerance=2.0, keep_blank_chars=False, use_text_flow=True)
     for w in words:
         y_mid = _round_to((w["top"] + w["bottom"]) / 2, 2)
         if abs(y_mid - header_y) <= 2.5 and w["text"].strip().lower() == "total":
@@ -190,10 +189,6 @@ def find_total_header_x(page, header_y: float) -> Optional[float]:
     return None
 
 def build_header_bins(header_positions: Dict[str, float], total_x: Optional[float]) -> List[Tuple[str, float, float]]:
-    """
-    Half-interval bins for each period; last bin ends halfway to TOTAL if present.
-    Returns [ (header, left_bound, right_bound) ].
-    """
     def _key(h: str):
         m = re.match(r"P(\d{1,2})\s+(\d{2})", h)
         return (int(m.group(2)), int(m.group(1))) if m else (999, 999)
@@ -242,7 +237,6 @@ def extract_words_grouped(page):
     return out
 
 def find_ad_for_store(lines: List[dict], store_idx: int, left_margin: float, back_limit: int = 12) -> Optional[str]:
-    """Walk upward from the store line to find the nearest left-aligned name-like line."""
     def is_left_aligned(x): return (x - left_margin) <= 24
     for j in range(store_idx - 1, max(store_idx - back_limit, -1), -1):
         cand = lines[j]
@@ -258,13 +252,6 @@ def find_ad_for_store(lines: List[dict], store_idx: int, left_margin: float, bac
 
 # ───────────────── PARSER ─────────────────
 def parse_pdf_build_ad_store_period_map(file_bytes: bytes):
-    """
-    Returns:
-      header_positions: {header -> x_center}
-      data: {AD: {Store: {Section: {"__all__": {Reason: {Header: int}}}}}}
-      ordered_headers: [headers...]
-      pairs_debug: list of (AD, Store)
-    """
     header_positions: Dict[str, float] = {}
     ordered_headers: List[str] = []
     pairs_debug: List[Tuple[str, str]] = []
@@ -282,20 +269,17 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes):
                 continue
             carry_headers = headers[:]
 
-            # header positions & order
             for htxt, xc, _ in headers:
                 header_positions[htxt] = xc
             ordered_headers = sort_headers(list(header_positions.keys()))
             header_y = min(h[2] for h in headers)
 
-            # TOTAL column x (if present) and bins for this page
             total_x = find_total_header_x(page, header_y) or carry_total_x
             carry_total_x = total_x
             header_bins = build_header_bins({h: header_positions[h] for h in ordered_headers}, total_x)
 
-            # label area (everything left of the first period)
             first_period_x = min(header_positions[h] for h in ordered_headers)
-            label_right_edge = first_period_x - 12  # small padding
+            label_right_edge = first_period_x - 12
 
             lines = extract_words_grouped(page)
             if not lines:
@@ -309,7 +293,6 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes):
             for idx, L in enumerate(lines):
                 txt = L["text"].strip()
 
-                # Store detection → resolve AD per store (look upward)
                 if STORE_LINE_RX.match(txt):
                     ad_for_this_store = find_ad_for_store(lines, idx, left_margin)
                     if ad_for_this_store:
@@ -320,28 +303,24 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes):
                         pairs_debug.append((current_ad, current_store))
                     continue
 
-                # Sections
                 if SECTION_TOGO.match(txt):
                     current_section = "To Go";   continue
                 if SECTION_DELIV.match(txt):
                     current_section = "Delivery"; continue
                 if SECTION_DINEIN.match(txt):
-                    current_section = "Dine-In";  continue  # ignored later
+                    current_section = "Dine-In";  continue
 
-                # Skip headings
                 if txt in HEADINGS:
                     continue
                 if not (current_ad and current_store and current_section in {"To Go","Delivery"}):
                     continue
 
-                # LEFT-SIDE LABEL ONLY (strict alias match)
                 label_tokens = [w["text"].strip() for w in L["words"] if w["x1"] <= label_right_edge]
                 label_text = " ".join(t for t in label_tokens if t)
                 canon = normalize_reason(label_text)
                 if not canon:
                     continue
 
-                # Accumulate numbers under period bins (ignore TOTAL/whitespace)
                 sect = data[current_ad].setdefault(current_store, {}).setdefault(current_section, {})
                 per_header = sect.setdefault("__all__", defaultdict(lambda: defaultdict(int)))
                 for w in L["words"]:
@@ -349,11 +328,11 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes):
                     if not re.fullmatch(r"-?\d+", token):
                         continue
                     if w["x0"] <= label_right_edge:
-                        continue  # ignore any digits in the label area
+                        continue
                     xmid = (w["x0"] + w["x1"]) / 2
                     mapped = map_x_to_header(header_bins, xmid)
                     if mapped is None:
-                        continue  # outside any period bin (e.g., under TOTAL)
+                        continue
                     if mapped in ordered_headers:
                         per_header[canon][mapped] += int(token)
 
@@ -445,7 +424,6 @@ col1, col2 = st.columns([1, 3])
 with col1:
     expand_all = st.toggle("Expand all Area Directors", value=False, help="Show all stores & reason pivots for each AD")
 
-# Quick AD totals glance table (optional compact summary)
 with col2:
     ad_summary = ad_totals.rename(columns={"Store Total": "AD Total"}).sort_values("Area Director")
     st.dataframe(ad_summary, use_container_width=True, height=min(400, 60 + 28 * max(2, len(ad_summary))))
@@ -492,12 +470,177 @@ with st.expander("🔎 Drill-down: show exact values per header for any AD & Sto
     else:
         st.caption("No data parsed.")
 
+# ───────────────── EMAIL GENERATOR (Eric’s voice + charts) ─────────────────
+st.header("5) Generate Eric-style email (with embedded charts)")
+st.caption("Produces HTML email with charts in Eric’s tone. You can copy the HTML or download it.")
+
+def fig_to_base64(fig) -> str:
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return base64.b64encode(buf.read()).decode("utf-8")
+
+# Chart 1: Reason Totals (To Go vs Delivery stacked bar)
+def build_reason_chart(df_reason: pd.DataFrame) -> str:
+    df_plot = df_reason.loc[[r for r in CANONICAL if r in df_reason.index], ["To Go", "Delivery"]].copy()
+    x = range(len(df_plot))
+    fig, ax = plt.subplots(figsize=(9, 4.8))
+    ax.bar(x, df_plot["To Go"].values, label="To Go")
+    ax.bar(x, df_plot["Delivery"].values, bottom=df_plot["To Go"].values, label="Delivery")
+    ax.set_xticks(list(x))
+    ax.set_xticklabels(list(df_plot.index), rotation=30, ha="right")
+    ax.set_ylabel("Complaints")
+    ax.set_title("To-Go & Delivery — Complaint Totals (Selected Period)")
+    ax.legend()
+    return fig_to_base64(fig)
+
+# Chart 2: AD Totals (Top 10)
+def build_ad_chart(df_ad: pd.DataFrame) -> str:
+    tmp = df_ad.copy()
+    tmp = tmp.sort_values("AD Total", ascending=False).head(10)
+    fig, ax = plt.subplots(figsize=(9, 4.8))
+    ax.bar(tmp["Area Director"], tmp["AD Total"])
+    ax.set_xticklabels(tmp["Area Director"], rotation=30, ha="right")
+    ax.set_ylabel("Total Complaints")
+    ax.set_title("Top 10 Area Directors — Total Complaints (Selected Period)")
+    return fig_to_base64(fig)
+
+# Optional delta vs previous period (if available)
+def compute_delta_vs_prior(df_detail: pd.DataFrame, sel: str) -> Optional[Tuple[str, int]]:
+    # Find immediate prior period in ordered_headers
+    try:
+        idx = ordered_headers.index(sel)
+    except ValueError:
+        return None
+    if idx == 0:
+        return None
+    prior = ordered_headers[idx - 1]
+    # Total complaints this period and prior
+    cur_total = int(df_detail["Value"].sum())
+    # Recompute for prior by rebuilding rows from raw_data
+    rows_prior = []
+    for ad, stores in raw_data.items():
+        for store, sections in stores.items():
+            for section, reason_map in sections.items():
+                if section not in {"To Go", "Delivery"}:
+                    continue
+                all_per_header = reason_map.get("__all__", {})
+                for canon in CANONICAL:
+                    v = 0
+                    if canon in all_per_header and prior in all_per_header[canon]:
+                        v = int(all_per_header[canon][prior])
+                    rows_prior.append({"Value": v})
+    df_prior = pd.DataFrame(rows_prior)
+    prior_total = int(df_prior["Value"].sum()) if not df_prior.empty else 0
+    return prior, cur_total - prior_total
+
+# Build charts
+reason_png_b64 = build_reason_chart(reason_totals.drop(index="— Grand Total —", errors="ignore"))
+ad_png_b64     = build_ad_chart(ad_totals.rename(columns={"Store Total": "AD Total"}))
+
+# Compute top 3 reasons (Bad 3 concept) for narrative
+top3 = (
+    reason_totals.drop(index="— Grand Total —", errors="ignore")
+    .sort_values("Total", ascending=False)
+    .head(3)
+    .index.tolist()
+)
+
+delta_info = compute_delta_vs_prior(df, sel_col)
+delta_line = ""
+if delta_info:
+    prior_label, delta_val = delta_info
+    arrow = "down" if delta_val < 0 else "up" if delta_val > 0 else "flat"
+    delta_line = f"P vs {prior_label}: {delta_val:+d} ({arrow})."
+
+# Subject & email HTML in Eric’s voice
+default_subject = f"{sel_col} NGC Reports"
+subject = st.text_input("Subject", value=default_subject)
+
+greeting = "Area Directors,"
+intro = (
+    "Once again, here is the most important email I send each month. "
+    "This is where we focus on what matters most to our guests and our teams."
+)
+color_key = (
+    "Green indicates improvement period-over-period. Red indicates decline. "
+    "The goal is to remove avoidable friction for the guest—consistently."
+)
+obs_lines = [
+    f"Selected period: {sel_col}. {delta_line}".strip(),
+    f"Top drivers (Bad 3 focus this period): {', '.join(top3)}.",
+    "To-Go and Delivery are the only channels included in this view; Dine-In is excluded."
+]
+
+coaching = (
+    "Remember—telling your team not to get complaints is not the solution. "
+    "Coach the process: order accuracy, check staging, condiment readiness, and beverage handoff. "
+    "Close the loop with simple verifications at the window and the expo line."
+)
+
+signoff = "Thank you for leading from the front,\n\nEric"
+
+html_email = f"""
+<html>
+  <body style="font-family: Arial, sans-serif; color:#111; line-height:1.4;">
+    <p>{greeting}</p>
+    <p>{intro}</p>
+    <p style="margin-top:0.6rem;"><strong>Context</strong><br>{color_key}</p>
+    <p style="margin-top:0.6rem;"><strong>Highlights</strong><br>{"<br>".join("- " + o for o in obs_lines)}</p>
+
+    <h3 style="margin-top:1rem;">To-Go & Delivery — Complaint Totals (Selected Period)</h3>
+    <img alt="Reason Totals" src="data:image/png;base64,{reason_png_b64}" style="max-width:100%; height:auto; border:1px solid #ddd; border-radius:6px;" />
+
+    <h3 style="margin-top:1rem;">Area Director — Total Complaints (Top 10)</h3>
+    <img alt="AD Totals" src="data:image/png;base64,{ad_png_b64}" style="max-width:100%; height:auto; border:1px solid #ddd; border-radius:6px;" />
+
+    <p style="margin-top:1rem;">{coaching}</p>
+    <p style="white-space:pre-line;">{signoff}</p>
+  </body>
+</html>
+"""
+
+st.subheader("Preview (HTML)")
+st.caption("Copy this into Outlook as HTML (Paste > Keep Source Formatting), or download as an .html file.")
+st.code(html_email, language="html")
+
+# Download HTML file
+html_bytes = html_email.encode("utf-8")
+st.download_button(
+    "📥 Download email as HTML",
+    data=html_bytes,
+    file_name=f"{subject.replace(' ','_')}.html",
+    mime="text/html"
+)
+
+# Plain-text fallback
+plain_text = f"""{greeting}
+
+{intro}
+
+Context
+- {color_key}
+
+Highlights
+- {obs_lines[0]}
+- {obs_lines[1]}
+- {obs_lines[2]}
+
+[Charts not included in plain text]
+
+{coaching}
+
+{signoff}
+"""
+st.subheader("Plain text (fallback)")
+st.code(plain_text, language="markdown")
+
 # ───────────────── EXPORTS ─────────────────
-st.header("5) Export results")
+st.header("6) Export results")
 csv = df_detail.to_csv(index=False)
 st.download_button("📥 Download detail CSV", data=csv, file_name=f"ad_store_detail_{sel_col.replace(' ','_')}.csv", mime="text/csv")
 
-# Excel with all sheets including Reason Totals
 buff = io.BytesIO()
 with pd.ExcelWriter(buff, engine="openpyxl") as writer:
     df_detail.to_excel(writer, index=False, sheet_name="Detail")
@@ -511,7 +654,6 @@ st.download_button(
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
 
-# CSV just for Reason Totals (quick paste into your sheet)
 rt_csv = reason_totals.to_csv()
 st.download_button(
     "📥 Download reason totals CSV (selected period)",

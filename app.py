@@ -355,6 +355,7 @@ with st.expander("🔎 Debug & Notes"):
 - Focused only on **To Go** and **Delivery**.
 - Ignores Dine-In completely.
 - Seven tracked reasons (case-insensitive):
+
   1. Missing food  
   2. Order wrong  
   3. Missing condiments  
@@ -362,3 +363,8 @@ with st.expander("🔎 Debug & Notes"):
   5. Missing bev  
   6. Missing ingredients  
   7. Packaging to-go complaint
+
+- “Store Total” = To Go + Delivery for those seven reasons (selected period).  
+- “AD Total” = Sum of that Area Director’s stores.  
+- Export buttons include detail, store totals, and AD totals.
+""")

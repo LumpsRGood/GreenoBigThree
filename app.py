@@ -1,5 +1,5 @@
-# Greeno Big Three v1.5.3 — strict mapping for To Go & Delivery (7 reasons) per period
-import io, os, re, base64
+# Greeno Big Three v1.5.4 — strict labels + strict column bins (To Go & Delivery)
+import io, os, re, base64, statistics
 from collections import defaultdict
 from typing import Dict, List, Tuple, Optional
 import pandas as pd
@@ -11,7 +11,7 @@ except Exception:
     pdfplumber = None
 
 # ───────────────── HEADER / THEME ─────────────────
-st.set_page_config(page_title="Greeno Big Three v1.5.3", layout="wide")
+st.set_page_config(page_title="Greeno Big Three v1.5.4", layout="wide")
 
 logo_path = "greenosu.webp"
 if os.path.exists(logo_path):
@@ -29,10 +29,10 @@ st.markdown(f"""
 ">
   {logo_html}
   <div style="display:flex; flex-direction:column; justify-content:center;">
-      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.5.3</h1>
-      <div style="height:5px; background-color:#F44336; width:260px; margin-top:10px; border-radius:3px;"></div>
+      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.5.4</h1>
+      <div style="height:5px; background-color:#F44336; width:300px; margin-top:10px; border-radius:3px;"></div>
       <p style="margin:10px 0 0; opacity:.9; font-size:1.05rem;">
-        Strict label mapping: counts only exact 7 reasons in <strong>To Go</strong> & <strong>Delivery</strong>.
+        Now counting only exact 7 labels, and mapping numbers to period columns using true half-interval bins.
       </p>
   </div>
 </div>
@@ -42,7 +42,7 @@ st.markdown(f"""
 with st.sidebar:
     st.header("1) Upload PDF")
     up = st.file_uploader("Choose the PDF report", type=["pdf"])
-    st.caption("Looks for headers like ‘P9 24’, ‘P1 25’ and maps numbers by x-position.")
+    st.caption("We detect P# YY headers, build precise column bins, and read To-Go & Delivery only.")
 
 if not up:
     st.markdown("""
@@ -77,13 +77,13 @@ if pdfplumber is None:
 
 # ───────────────── CONSTANTS ─────────────────
 HEADINGS = {"Area Director", "Restaurant", "Order Visit Type", "Reason for Contact"}
-STORE_LINE_RX = re.compile(r"^\s*\d{3,6}\s*-\s+.*")  # "5456 - City" or "0406 - City"
+STORE_LINE_RX = re.compile(r"^\s*\d{3,6}\s*-\s+.*")  # e.g., "5456 - City (Location)" or "0406 - City"
 SECTION_TOGO   = re.compile(r"^\s*(To[\s-]?Go|To-go)\s*$", re.IGNORECASE)
 SECTION_DELIV  = re.compile(r"^\s*Delivery\s*$", re.IGNORECASE)
 SECTION_DINEIN = re.compile(r"^\s*Dine[\s-]?In\s*$", re.IGNORECASE)
 HEADER_RX = re.compile(r"\bP(?:1[0-2]|[1-9])\s+(?:2[0-9])\b")
 
-# Canonical reasons + exact aliases (STRICT)
+# Canonical reasons (your strict mapping)
 CANONICAL = [
     "Missing food",
     "Order wrong",
@@ -95,58 +95,21 @@ CANONICAL = [
 ]
 
 def _norm(s: str) -> str:
-    # normalize text for strict compare
     return re.sub(r"[^a-z0-9]+", " ", s.lower()).strip()
 
-# exact aliases → canonical (normalized keys)
+# EXACT aliases only (normalized) → canonical
 REASON_ALIASES_NORM = {
     _norm("Missing Item (Food)"):        "Missing food",
-    _norm("Missing Food"):               "Missing food",
-
-    _norm("Order wrong"):                "Order wrong",
-
+    _norm("Order Wrong"):                "Order wrong",
     _norm("Missing Condiments"):         "Missing condiments",
-
     _norm("Out Of Menu Item"):           "Out of menu item",
-    _norm("Out of menu item"):           "Out of menu item",
-
     _norm("Missing Item (Bev)"):         "Missing bev",
-    _norm("Missing Bev"):                "Missing bev",
-    _norm("Missing Beverage"):           "Missing bev",
-    _norm("Missing Drink"):              "Missing bev",
-
     _norm("Missing Ingredient (Food)"):  "Missing ingredients",
-    _norm("Missing Ingredients"):        "Missing ingredients",
-
     _norm("Packaging To Go Complaint"):  "Packaging to-go complaint",
-    _norm("Packaging To-Go Complaint"):  "Packaging to-go complaint",
-    _norm("Packaging to-go complaint"):  "Packaging to-go complaint",
 }
-
-# safe fallback patterns (used only if strict alias fails)
-REASON_FALLBACK_RX = {
-    "Missing food":              re.compile(r"^\s*Missing (Item )?\(?Food\)?\s*$", re.IGNORECASE),
-    "Order wrong":               re.compile(r"^\s*Order wrong\s*$", re.IGNORECASE),
-    "Missing condiments":        re.compile(r"^\s*Missing Condiments?\s*$", re.IGNORECASE),
-    "Out of menu item":          re.compile(r"^\s*Out Of Menu Item\s*$", re.IGNORECASE),
-    "Missing bev":               re.compile(r"^\s*Missing (Item )?\(?Bev(erage)?|Drink\)?\s*$", re.IGNORECASE),
-    "Missing ingredients":       re.compile(r"^\s*Missing Ingredients?\s*(\(Food\))?\s*$", re.IGNORECASE),
-    "Packaging to-go complaint": re.compile(r"^\s*Packaging (To[\s-]?Go|to-go) Complaint\s*$", re.IGNORECASE),
-}
-
-def normalize_reason_strict(raw: str) -> Optional[str]:
-    key = _norm(raw)
-    return REASON_ALIASES_NORM.get(key)
-
-def normalize_reason_safe(raw: str) -> Optional[str]:
-    for canon, rx in REASON_FALLBACK_RX.items():
-        if rx.search(raw):
-            return canon
-    return None
 
 def normalize_reason(raw: str) -> Optional[str]:
-    # STRICT first; fallback only if needed
-    return normalize_reason_strict(raw) or normalize_reason_safe(raw)
+    return REASON_ALIASES_NORM.get(_norm(raw))
 
 def _round_to(x: float, base: int = 2) -> float:
     return round(x / base) * base
@@ -179,6 +142,9 @@ def looks_like_name(s: str) -> bool:
 
 # ───────────────── HELPERS ─────────────────
 def find_period_headers(page) -> List[Tuple[str, float, float]]:
+    """
+    Find 'P# YY' headers on the header line; returns list of (text, x_center, y_mid).
+    """
     words = page.extract_words(x_tolerance=1.0, y_tolerance=2.0, keep_blank_chars=False, use_text_flow=True)
     lines = defaultdict(list)
     for w in words:
@@ -203,6 +169,7 @@ def find_period_headers(page) -> List[Tuple[str, float, float]]:
             i += 1
         if len(merged) >= 3:
             headers.extend(merged)
+    # dedupe by header text
     seen = {}
     for txt, xc, ym in sorted(headers, key=lambda h: (h[2], h[1])):
         seen.setdefault(txt, (txt, xc, ym))
@@ -213,6 +180,50 @@ def sort_headers(headers: List[str]) -> List[str]:
         m = re.match(r"P(\d{1,2})\s+(\d{2})", h)
         return (int(m.group(2)), int(m.group(1))) if m else (999, 999)
     return sorted(headers, key=key)
+
+def find_total_header_x(page, header_y: float) -> Optional[float]:
+    """
+    Try to find the 'Total' column header on the same y-line as the period headers.
+    """
+    words = page.extract_words(x_tolerance=1.0, y_tolerance=2.0, keep_blank_chars=False, use_text_flow=True)
+    candidates = []
+    for w in words:
+        y_mid = _round_to((w["top"] + w["bottom"]) / 2, 2)
+        if abs(y_mid - header_y) <= 2.5 and w["text"].strip().lower() == "total":
+            candidates.append((w["x0"] + w["x1"]) / 2)
+    return candidates[0] if candidates else None
+
+def build_header_bins(header_positions: Dict[str, float], total_x: Optional[float]) -> List[Tuple[str, float, float]]:
+    """
+    Build [ (header, left_bound, right_bound) ] so each number maps only inside a bin.
+    Right edge of the last bin stops at midpoint to 'Total' if present, else at +0.5*median_gap.
+    """
+    items = sorted(header_positions.items(), key=lambda kv: (int(re.search(r"\d{2}$", kv[0]).group(0)), int(re.search(r"\d{1,2}", kv[0]).group(0))))
+    headers = [h for h, _ in items]
+    xs = [x for _, x in items]
+    if len(xs) >= 2:
+        gaps = [xs[i+1] - xs[i] for i in range(len(xs)-1)]
+        med_gap = statistics.median(gaps)
+    else:
+        med_gap = 60.0  # fallback
+    bins = []
+    for i, (h, x) in enumerate(zip(headers, xs)):
+        left = (xs[i-1] + x)/2 if i > 0 else x - 0.5*med_gap
+        if i < len(xs)-1:
+            right = (x + xs[i+1])/2
+        else:
+            if total_x is not None:
+                right = (x + total_x)/2
+            else:
+                right = x + 0.5*med_gap
+        bins.append((h, left, right))
+    return bins
+
+def map_x_to_header(header_bins: List[Tuple[str, float, float]], xmid: float) -> Optional[str]:
+    for h, left, right in header_bins:
+        if left <= xmid < right:
+            return h
+    return None
 
 def extract_words_grouped(page):
     words = page.extract_words(
@@ -258,29 +269,37 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes):
     header_positions: Dict[str, float] = {}
     ordered_headers: List[str] = []
     pairs_debug: List[Tuple[str, str]] = []
-
     data: Dict[str, Dict[str, Dict[str, Dict[str, Dict[str, int]]]]] = defaultdict(
         lambda: defaultdict(lambda: defaultdict(dict))
     )
 
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
         carry_headers = None
+        carry_total_x = None
         for page in pdf.pages:
             headers = find_period_headers(page) or carry_headers
             if not headers:
                 continue
             carry_headers = headers[:]
 
+            # header positions & order
             for htxt, xc, _ in headers:
                 header_positions[htxt] = xc
             ordered_headers = sort_headers(list(header_positions.keys()))
+            header_y = min(h[2] for h in headers)
+
+            # find Total col x on this header line (if present)
+            total_x = find_total_header_x(page, header_y) or carry_total_x
+            carry_total_x = total_x
+
+            # Build bins once we know positions + optional Total
+            header_bins = build_header_bins({h: header_positions[h] for h in ordered_headers}, total_x)
 
             lines = extract_words_grouped(page)
             if not lines:
                 continue
 
             left_margin = min(L["x_min"] for L in lines)
-
             current_ad: Optional[str] = None
             current_store: Optional[str] = None
             current_section: Optional[str] = None
@@ -313,12 +332,12 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes):
                 if not (current_ad and current_store and current_section in {"To Go","Delivery"}):
                     continue
 
-                # Strict reason match
+                # STRICT reason match (only your 7 exact aliases)
                 canon = normalize_reason(txt)
                 if not canon:
                     continue
 
-                # Accumulate numbers by nearest period header
+                # Accumulate numbers that land inside a column bin
                 sect = data[current_ad].setdefault(current_store, {}).setdefault(current_section, {})
                 per_header = sect.setdefault("__all__", defaultdict(lambda: defaultdict(int)))
                 for w in L["words"]:
@@ -326,8 +345,10 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes):
                     if not re.fullmatch(r"-?\d+", token):
                         continue
                     xmid = (w["x0"] + w["x1"]) / 2
-                    nearest_header = min(header_positions.items(), key=lambda kv: abs(kv[1] - xmid))[0]
-                    per_header[canon][nearest_header] += int(token)
+                    mapped = map_x_to_header(header_bins, xmid)
+                    if mapped is None:
+                        continue  # number outside any period bin (e.g., under Total)
+                    per_header[canon][mapped] += int(token)
 
     return {h: header_positions[h] for h in ordered_headers}, data, ordered_headers, pairs_debug
 
@@ -380,7 +401,7 @@ df_detail = df.merge(store_totals, on=["Area Director","Store"], how="left") \
               .merge(ad_totals, on="Area Director", how="left")
 
 # ───────────────── DISPLAY ─────────────────
-st.success("✅ Parsed with strict mapping.")
+st.success("✅ Parsed with strict labels & column bins.")
 st.subheader(f"Results for period: {sel_col}")
 
 ads = df_detail["Area Director"].dropna().unique().tolist()
@@ -415,7 +436,7 @@ with st.expander("🔎 Drill-down: show exact values per header for any AD & Sto
             mat.append(row)
         df_mat = pd.DataFrame(mat).set_index("Reason")
         st.dataframe(df_mat, use_container_width=True)
-        st.caption("Use this to verify that the selected period’s column (above) matches what’s in the PDF for these rows.")
+        st.caption("Verifies the exact numbers parsed under each period header for your chosen store.")
     else:
         st.caption("No data parsed.")
 

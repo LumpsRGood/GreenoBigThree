@@ -1,4 +1,4 @@
-# Greeno Big Three v1.5.1 — AD → Store → (To Go, Delivery) → 7 reasons per period
+# Greeno Big Three v1.5.2 — AD → Store → (To Go, Delivery) → 7 reasons per period
 import io, os, re, base64
 from collections import defaultdict
 from typing import Dict, List, Tuple, Optional
@@ -11,7 +11,7 @@ except Exception:
     pdfplumber = None
 
 # ───────────────── HEADER / THEME ─────────────────
-st.set_page_config(page_title="Greeno Big Three v1.5.1", layout="wide")
+st.set_page_config(page_title="Greeno Big Three v1.5.2", layout="wide")
 
 logo_path = "greenosu.webp"
 if os.path.exists(logo_path):
@@ -29,10 +29,10 @@ st.markdown(f"""
 ">
   {logo_html}
   <div style="display:flex; flex-direction:column; justify-content:center;">
-      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.5.1</h1>
+      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.5.2</h1>
       <div style="height:5px; background-color:#F44336; width:260px; margin-top:10px; border-radius:3px;"></div>
       <p style="margin:10px 0 0; opacity:.9; font-size:1.05rem;">
-        AD → Store totals for <strong>To Go</strong> & <strong>Delivery</strong> across 7 key reasons per selected period.
+        Per-store attribution fixed: each store maps to the nearest Area Director above it.
       </p>
   </div>
 </div>
@@ -42,7 +42,7 @@ st.markdown(f"""
 with st.sidebar:
     st.header("1) Upload PDF")
     up = st.file_uploader("Choose the PDF report", type=["pdf"])
-    st.caption("Looks for headers like ‘P9 24’, ‘P1 25’, maps by x-position, and reads To-Go & Delivery only.")
+    st.caption("Finds headers like ‘P9 24’, maps numbers by x-position, and reads To-Go & Delivery only.")
 
 if not up:
     st.markdown("""
@@ -77,9 +77,9 @@ if pdfplumber is None:
 
 # ───────────────── CONSTANTS ─────────────────
 HEADINGS = {"Area Director", "Restaurant", "Order Visit Type", "Reason for Contact"}
-STORE_LINE_RX = re.compile(r"^\s*\d{4,6}\s*-\s+.*")  # e.g., "5456 - City (Location)"
-SECTION_TOGO = re.compile(r"^\s*(To[\s-]?Go|To-go)\s*$", re.IGNORECASE)
-SECTION_DELIV = re.compile(r"^\s*Delivery\s*$", re.IGNORECASE)
+STORE_LINE_RX = re.compile(r"^\s*\d{3,6}\s*-\s+.*")  # e.g., "5456 - City (Location)" or "0406 - City"
+SECTION_TOGO   = re.compile(r"^\s*(To[\s-]?Go|To-go)\s*$", re.IGNORECASE)
+SECTION_DELIV  = re.compile(r"^\s*Delivery\s*$", re.IGNORECASE)
 SECTION_DINEIN = re.compile(r"^\s*Dine[\s-]?In\s*$", re.IGNORECASE)
 HEADER_RX = re.compile(r"\bP(?:1[0-2]|[1-9])\s+(?:2[0-9])\b")
 
@@ -102,6 +102,7 @@ REASON_PATTERNS = {
     "Missing ingredients":       [re.compile(r"\bMissing Ingredient(s)?\b", re.IGNORECASE)],
     "Packaging to-go complaint": [re.compile(r"\bPackaging (To[\s-]?Go|to-go) Complaint\b", re.IGNORECASE)],
 }
+
 def normalize_reason(raw: str) -> Optional[str]:
     s = raw.strip()
     for canon, patterns in REASON_PATTERNS.items():
@@ -122,6 +123,8 @@ def looks_like_name(s: str) -> bool:
         "quality","presentation","overcooked","burnt","undercooked","host","server","greet","portion"
     }
     s_clean = s.strip()
+    if s_clean.lower() == "area director":
+        return False
     if any(ch.isdigit() for ch in s_clean):
         return False
     if "(" in s_clean or ")" in s_clean or " - " in s_clean or "—" in s_clean or "–" in s_clean:
@@ -191,16 +194,35 @@ def extract_words_grouped(page):
             out.append({"y": y, "x_min": ws[0]["x0"], "words": ws, "text": text})
     return out
 
+def find_ad_for_store(lines: List[dict], store_idx: int, left_margin: float, back_limit: int = 12) -> Optional[str]:
+    """Walk upward from the store line to find the nearest left-aligned name-like line."""
+    def is_left_aligned(x): return (x - left_margin) <= 24
+    for j in range(store_idx - 1, max(store_idx - back_limit, -1), -1):
+        cand = lines[j]
+        s = cand["text"].strip()
+        if is_left_aligned(cand["x_min"]) and looks_like_name(s):
+            return s
+    # broader fallback: scan farther up if needed
+    for j in range(store_idx - back_limit - 1, -1, -1):
+        cand = lines[j]
+        s = cand["text"].strip()
+        if looks_like_name(s):
+            return s
+    return None
+
 # ───────────────── PARSER ─────────────────
-def parse_pdf_build_ad_store_period_map(file_bytes: bytes) -> Tuple[Dict[str, float], Dict[str, Dict[str, Dict[str, Dict[str, int]]]], List[str]]:
+def parse_pdf_build_ad_store_period_map(file_bytes: bytes):
     """
     Returns:
-      header_positions: mapping header -> x_center
-      data: {AD: {Store: {Section: { "__all__": {Reason: {Header: int}} }}}}
-      ordered_headers: ordered list of period headers
+      header_positions: {header -> x_center}
+      data: {AD: {Store: {Section: {"__all__": {Reason: {Header: int}}}}}}
+      ordered_headers: [headers...]
+      pairs_debug: list of (AD, Store) seen (for troubleshooting)
     """
     header_positions: Dict[str, float] = {}
     ordered_headers: List[str] = []
+    pairs_debug: List[Tuple[str, str]] = []
+
     data: Dict[str, Dict[str, Dict[str, Dict[str, Dict[str, int]]]]] = defaultdict(
         lambda: defaultdict(lambda: defaultdict(dict))
     )
@@ -208,9 +230,7 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes) -> Tuple[Dict[str, fl
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
         carry_headers = None
         for page in pdf.pages:
-            headers = find_period_headers(page)
-            if not headers and carry_headers:
-                headers = carry_headers
+            headers = find_period_headers(page) or carry_headers
             if not headers:
                 continue
             carry_headers = headers[:]
@@ -220,57 +240,66 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes) -> Tuple[Dict[str, fl
             ordered_headers = sort_headers(list(header_positions.keys()))
 
             lines = extract_words_grouped(page)
+            if not lines:
+                continue
 
-            current_ad = None
-            current_store = None
-            current_section = None
+            left_margin = min(L["x_min"] for L in lines)
 
+            current_ad: Optional[str] = None
+            current_store: Optional[str] = None
+            current_section: Optional[str] = None
+
+            # Iterate lines top→bottom; AD is decided PER STORE by scanning above it
             for idx, L in enumerate(lines):
-                if L["text"].strip().lower() == "area director":
-                    left_margin = min(w["x0"] for w in L["words"]) if L["words"] else L["x_min"]
-                    def is_left_aligned(x): return (x - left_margin) <= 20
-                    for j in range(idx + 1, min(idx + 6, len(lines))):
-                        cand = lines[j]
-                        s = cand["text"].strip()
-                        if is_left_aligned(cand["x_min"]) and looks_like_name(s):
-                            current_ad = s
-                            break
-
-            if not current_ad:
-                first_store_idx = next((k for k, L in enumerate(lines) if STORE_LINE_RX.match(L["text"])), None)
-                if first_store_idx is not None:
-                    for j in range(first_store_idx - 1, max(first_store_idx - 6, -1), -1):
-                        s = lines[j]["text"].strip()
-                        if looks_like_name(s):
-                            current_ad = s
-                            break
-
-            for L in lines:
                 txt = L["text"].strip()
-                if STORE_LINE_RX.match(txt):
-                    current_store = txt; current_section = None; continue
-                if SECTION_TOGO.match(txt): current_section = "To Go"; continue
-                if SECTION_DELIV.match(txt): current_section = "Delivery"; continue
-                if SECTION_DINEIN.match(txt): current_section = "Dine-In"; continue
-                if txt in HEADINGS: continue
-                if not (current_ad and current_store and current_section in {"To Go","Delivery"}): continue
-                canon = normalize_reason(txt)
-                if not canon: continue
 
+                # Store detection
+                if STORE_LINE_RX.match(txt):
+                    ad_for_this_store = find_ad_for_store(lines, idx, left_margin)
+                    if ad_for_this_store:
+                        current_ad = ad_for_this_store
+                    current_store = txt
+                    current_section = None
+                    if current_ad:
+                        pairs_debug.append((current_ad, current_store))
+                    continue
+
+                # Sections
+                if SECTION_TOGO.match(txt):
+                    current_section = "To Go";   continue
+                if SECTION_DELIV.match(txt):
+                    current_section = "Delivery"; continue
+                if SECTION_DINEIN.match(txt):
+                    current_section = "Dine-In";  continue  # ignored later
+
+                # Skip headings
+                if txt in HEADINGS:
+                    continue
+
+                # Must have AD + Store + (To Go/Delivery)
+                if not (current_ad and current_store and current_section in {"To Go","Delivery"}):
+                    continue
+
+                canon = normalize_reason(txt)
+                if not canon:
+                    continue
+
+                # Accumulate numbers by nearest period header
                 sect = data[current_ad].setdefault(current_store, {}).setdefault(current_section, {})
                 per_header = sect.setdefault("__all__", defaultdict(lambda: defaultdict(int)))
                 for w in L["words"]:
                     token = w["text"].strip()
-                    if not re.fullmatch(r"-?\d+", token): continue
+                    if not re.fullmatch(r"-?\d+", token): 
+                        continue
                     xmid = (w["x0"] + w["x1"]) / 2
                     nearest_header = min(header_positions.items(), key=lambda kv: abs(kv[1] - xmid))[0]
                     per_header[canon][nearest_header] += int(token)
 
-    return {h: header_positions[h] for h in ordered_headers}, data, ordered_headers
+    return {h: header_positions[h] for h in ordered_headers}, data, ordered_headers, pairs_debug
 
 # ───────────────── RUN ─────────────────
 with st.spinner("Parsing PDF…"):
-    header_x_map, raw_data, ordered_headers = parse_pdf_build_ad_store_period_map(file_bytes)
+    header_x_map, raw_data, ordered_headers, pairs_debug = parse_pdf_build_ad_store_period_map(file_bytes)
 
 if not ordered_headers:
     st.error("No period headers (like ‘P9 24’) found.")
@@ -350,21 +379,9 @@ st.download_button("📥 Download Excel (Detail + Totals)", data=buff.getvalue()
                    file_name=f"ad_store_{sel_col.replace(' ','_')}.xlsx",
                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-with st.expander("🔎 Debug & Notes"):
-    st.markdown("""
-- Focused only on **To Go** and **Delivery**.
-- Ignores Dine-In completely.
-- Seven tracked reasons (case-insensitive):
-
-  1. Missing food  
-  2. Order wrong  
-  3. Missing condiments  
-  4. Out of menu item  
-  5. Missing bev  
-  6. Missing ingredients  
-  7. Packaging to-go complaint
-
-- “Store Total” = To Go + Delivery for those seven reasons (selected period).  
-- “AD Total” = Sum of that Area Director’s stores.  
-- Export buttons include detail, store totals, and AD totals.
-""")
+# ───────────────── DEBUG / VERIFICATION ─────────────────
+with st.expander("🔎 Debug: AD ↔ Store pairs detected this run"):
+    if pairs_debug:
+        st.dataframe(pd.DataFrame(pairs_debug, columns=["Area Director","Store"]))
+    else:
+        st.caption("No pairs captured (unexpected).")

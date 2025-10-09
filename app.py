@@ -1,4 +1,4 @@
-# Greeno Big Three v1.5.7 — strict labels from left label area + TOTAL-aware bins + reason totals
+# Greeno Big Three v1.5.8 — baseline v1.5.7 + collapsible AD sections (expand on demand)
 import io, os, re, base64, statistics
 from collections import defaultdict
 from typing import Dict, List, Tuple, Optional
@@ -11,7 +11,7 @@ except Exception:
     pdfplumber = None
 
 # ───────────────── HEADER / THEME ─────────────────
-st.set_page_config(page_title="Greeno Big Three v1.5.7", layout="wide")
+st.set_page_config(page_title="Greeno Big Three v1.5.8", layout="wide")
 
 logo_path = "greenosu.webp"
 if os.path.exists(logo_path):
@@ -29,10 +29,10 @@ st.markdown(f"""
 ">
   {logo_html}
   <div style="display:flex; flex-direction:column; justify-content:center;">
-      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.5.7</h1>
+      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.5.8</h1>
       <div style="height:5px; background-color:#F44336; width:300px; margin-top:10px; border-radius:3px;"></div>
       <p style="margin:10px 0 0; opacity:.9; font-size:1.05rem;">
-        Strict 7-label mapping from the left label area + precise period bins using the TOTAL column.
+        Baseline locked (strict 7-labels + TOTAL-aware bins) with collapsible Area Director details.
       </p>
   </div>
 </div>
@@ -437,25 +437,35 @@ ad_totals = (
 df_detail = df.merge(store_totals, on=["Area Director","Store"], how="left") \
               .merge(ad_totals, on="Area Director", how="left")
 
-# ───────────────── DISPLAY ─────────────────
+# ───────────────── DISPLAY (collapsible AD sections) ─────────────────
 st.success("✅ Parsed with strict labels & TOTAL-aware bins.")
 st.subheader(f"Results for period: {sel_col}")
+
+col1, col2 = st.columns([1, 3])
+with col1:
+    expand_all = st.toggle("Expand all Area Directors", value=False, help="Show all stores & reason pivots for each AD")
+
+# Quick AD totals glance table (optional compact summary)
+with col2:
+    ad_summary = ad_totals.rename(columns={"Store Total": "AD Total"}).sort_values("Area Director")
+    st.dataframe(ad_summary, use_container_width=True, height=min(400, 60 + 28 * max(2, len(ad_summary))))
 
 ads = df_detail["Area Director"].dropna().unique().tolist()
 for ad in ads:
     sub = df_detail[df_detail["Area Director"]==ad].copy()
-    st.markdown(f"### 👤 {ad}  —  AD Total: **{int(sub['AD Total'].iloc[0])}**")
-    stores = sub["Store"].dropna().unique().tolist()
-    for store in stores:
-        substore = sub[sub["Store"]==store].copy()
-        store_total = int(substore["Store Total"].iloc[0])
-        st.markdown(f"**{store}**  — Store Total: **{store_total}**")
-        pivot = (
-            substore.pivot_table(index="Reason", columns="Section", values="Value", aggfunc="sum", fill_value=0)
-                    .reindex(CANONICAL)
-        )
-        pivot["Total"] = pivot.sum(axis=1)
-        st.dataframe(pivot, use_container_width=True)
+    ad_total_val = int(sub['AD Total'].iloc[0])
+    with st.expander(f"👤 {ad} — AD Total: {ad_total_val}", expanded=expand_all):
+        stores = sub["Store"].dropna().unique().tolist()
+        for store in stores:
+            substore = sub[sub["Store"]==store].copy()
+            store_total = int(substore["Store Total"].iloc[0])
+            st.markdown(f"**{store}**  — Store Total: **{store_total}**")
+            pivot = (
+                substore.pivot_table(index="Reason", columns="Section", values="Value", aggfunc="sum", fill_value=0)
+                        .reindex(CANONICAL)
+            )
+            pivot["Total"] = pivot.sum(axis=1)
+            st.dataframe(pivot, use_container_width=True)
 
 # ───────────────── REASON TOTALS (copy-friendly) ─────────────────
 st.header("4) Reason totals (selected period)")

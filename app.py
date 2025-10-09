@@ -15,7 +15,7 @@ except Exception:
     pdfplumber = None
 
 # ───────────────── CONFIG & HEADER ─────────────────
-st.set_page_config(page_title="Greeno Big Three v1.4.2", layout="wide")
+st.set_page_config(page_title="Greeno Big Three v1.3", layout="wide")
 
 # Your local logo file
 logo_path = "greenosu.webp"
@@ -41,7 +41,7 @@ st.markdown(f"""
 ">
     {logo_html}
     <div style="display:flex; flex-direction:column; justify-content:center;">
-        <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.4.2</h1>
+        <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.3</h1>
         <div style="height:5px; background-color:#F44336; width:220px; margin-top:10px; border-radius:3px;"></div>
         <p style="margin:10px 0 0; opacity:.9; font-size:1.05rem;">
             Upload your PDF, pick a period column, and extract exactly what you need.

@@ -1,5 +1,5 @@
-# Greeno Big Three v1.6.3 — strict parser (TOTAL-aware bins, left-label) +
-# collapsible ADs + reason totals (missing) + text-only Eric email +
+# Greeno Big Three v1.6.4 — strict parser (TOTAL-aware bins, left-label) +
+# collapsible ADs + reason totals (Missing + Attitude) + text-only Eric email +
 # Categories: To-go Missing Complaints (To-Go/Delivery) + Attitude (all segments) + Other (placeholder)
 import io, os, re, base64, statistics
 from collections import defaultdict
@@ -13,7 +13,7 @@ except Exception:
     pdfplumber = None
 
 # ───────────────── HEADER / THEME ─────────────────
-st.set_page_config(page_title="Greeno Big Three v1.6.3", layout="wide")
+st.set_page_config(page_title="Greeno Big Three v1.6.4", layout="wide")
 
 logo_path = "greenosu.webp"
 if os.path.exists(logo_path):
@@ -31,10 +31,10 @@ st.markdown(f"""
 ">
   {logo_html}
   <div style="display:flex; flex-direction:column; justify-content:center;">
-      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.6.3</h1>
+      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.6.4</h1>
       <div style="height:5px; background-color:#F44336; width:300px; margin-top:10px; border-radius:3px;"></div>
       <p style="margin:10px 0 0; opacity:.9; font-size:1.05rem;">
-        Strict 7-labels + TOTAL-aware bins · Collapsible AD sections · Category summaries (Missing + Attitude) · Text-only Eric email
+        Strict parsing + TOTAL-aware bins · Collapsible AD sections · Reason totals (Missing + Attitude) · Text-only Eric email · Category summaries
       </p>
   </div>
 </div>
@@ -44,7 +44,7 @@ st.markdown(f"""
 with st.sidebar:
     st.header("1) Upload PDF")
     up = st.file_uploader("Choose the PDF report", type=["pdf"])
-    st.caption("Parses labels from the left side. Missing category uses To-Go & Delivery; Attitude uses all segments.")
+    st.caption("Parses labels from the left side. Missing uses To-Go & Delivery; Attitude includes all segments.")
 
 if not up:
     st.markdown("""
@@ -122,7 +122,6 @@ ALIASES_MISSING = {
     _norm("Missing Ingredient (Food)"):  "Missing ingredients",
     _norm("Packaging To Go Complaint"):  "Packaging to-go complaint",
 }
-
 ALIASES_ATTITUDE = {
     _norm("Unprofessional Behavior"):                 "Unprofessional/Unfriendly",
     _norm("Unfriendly Attitude"):                     "Unprofessional/Unfriendly",
@@ -133,7 +132,6 @@ ALIASES_ATTITUDE = {
     _norm("Manager Did Not Follow Up"):               "Manager did not follow up",
     _norm("Argued With Guest"):                       "Argued with guest",
 }
-
 REASON_ALIASES_NORM = {**ALIASES_MISSING, **ALIASES_ATTITUDE}
 
 def normalize_reason(raw: str) -> Optional[str]:
@@ -406,15 +404,59 @@ CATEGORY_OTHER        = "Other"      # placeholder
 
 CATEGORY_MAP = {r: CATEGORY_TOGO_MISSING for r in MISSING_REASONS}
 CATEGORY_MAP.update({r: CATEGORY_ATTITUDE for r in ATTITUDE_REASONS})
-# (When you give me labels for "Other", I’ll add them here with CATEGORY_OTHER)
-
 df["Category"] = df["Reason"].map(CATEGORY_MAP).fillna("Unassigned")
 
-# ---- Reason totals (selected period, Missing category only) ----
-def _order_series(s: pd.Series) -> pd.Series:
-    return s.reindex(MISSING_REASONS)
+# ───────────────── DISPLAY (collapsible AD sections) ─────────────────
+st.success("✅ Parsed with strict labels & TOTAL-aware bins.")
+st.subheader(f"Results for period: {sel_col}")
+
+col1, col2 = st.columns([1, 3])
+with col1:
+    expand_all = st.toggle("Expand all Area Directors", value=False, help="Show all stores & reason pivots for each AD")
+
+with col2:
+    ad_totals = (
+        df.groupby(["Area Director","Store"], as_index=False)["Value"].sum()
+          .groupby("Area Director", as_index=False)["Value"].sum()
+          .rename(columns={"Value":"AD Total"})
+    )
+    st.dataframe(ad_totals.sort_values("Area Director"), use_container_width=True, height=min(400, 60 + 28 * max(2, len(ad_totals))))
+
+# per-store + per-AD totals (all rows)
+store_totals = (
+    df.groupby(["Area Director","Store"], as_index=False)["Value"].sum()
+      .rename(columns={"Value":"Store Total"})
+)
+df_detail = df.merge(store_totals, on=["Area Director","Store"], how="left") \
+              .merge(ad_totals, on="Area Director", how="left")
+
+ads = df_detail["Area Director"].dropna().unique().tolist()
+for ad in ads:
+    sub = df_detail[df_detail["Area Director"]==ad].copy()
+    ad_total_val = int(sub['AD Total'].iloc[0])
+    with st.expander(f"👤 {ad} — AD Total: {ad_total_val}", expanded=expand_all):
+        stores = sub["Store"].dropna().unique().tolist()
+        for store in stores:
+            substore = sub[sub["Store"]==store].copy()
+            store_total = int(substore["Store Total"].iloc[0])
+            st.markdown(f"**{store}**  — Store Total: **{store_total}**")
+            show_reasons = MISSING_REASONS + ATTITUDE_REASONS
+            pivot = (
+                substore[substore["Reason"].isin(show_reasons)]
+                .pivot_table(index="Reason", columns="Section", values="Value", aggfunc="sum", fill_value=0)
+                .reindex(show_reasons)
+            )
+            pivot["Total"] = pivot.sum(axis=1)
+            st.dataframe(pivot, use_container_width=True)
+
+# ───────────────── REASON TOTALS — Missing ─────────────────
+st.header("4) Reason totals — To-go Missing Complaints (selected period)")
+st.caption("To-Go and Delivery only, for the seven Missing reasons (matches your spreadsheet flow).")
 
 missing_df = df[df["Reason"].isin(MISSING_REASONS) & df["Section"].isin({"To Go","Delivery"})]
+
+def _order_series_missing(s: pd.Series) -> pd.Series:
+    return s.reindex(MISSING_REASONS)
 
 tot_to_go = (
     missing_df[missing_df["Section"] == "To Go"]
@@ -434,65 +476,61 @@ tot_overall = (
       .astype(int)
 )
 
-reason_totals = pd.DataFrame({
-    "To Go": _order_series(tot_to_go),
-    "Delivery": _order_series(tot_delivery),
-    "Total": _order_series(tot_overall),
+reason_totals_missing = pd.DataFrame({
+    "To Go": _order_series_missing(tot_to_go),
+    "Delivery": _order_series_missing(tot_delivery),
+    "Total": _order_series_missing(tot_overall),
 }).fillna(0).astype(int)
-reason_totals.loc["— Grand Total —"] = reason_totals.sum(numeric_only=True)
+reason_totals_missing.loc["— Grand Total —"] = reason_totals_missing.sum(numeric_only=True)
 
-# Store & AD totals (for all rows we captured)
-store_totals = (
-    df.groupby(["Area Director","Store"], as_index=False)["Value"].sum()
-      .rename(columns={"Value":"Store Total"})
+st.dataframe(reason_totals_missing, use_container_width=True)
+
+# ───────────────── REASON TOTALS — Attitude ─────────────────
+st.header("4b) Reason totals — Attitude (selected period)")
+st.caption("All segments (Dine-In, To Go, Delivery) for the seven Attitude reasons.")
+
+att_df = df[df["Reason"].isin(ATTITUDE_REASONS)]
+
+def _order_series_att(s: pd.Series) -> pd.Series:
+    return s.reindex(ATTITUDE_REASONS)
+
+att_dinein = (
+    att_df[att_df["Section"] == "Dine-In"]
+      .groupby("Reason", as_index=True)["Value"]
+      .sum()
+      .astype(int)
 )
-ad_totals = (
-    store_totals.groupby("Area Director", as_index=False)["Store Total"].sum()
-      .rename(columns={"Store Total":"AD Total"})
+att_togo = (
+    att_df[att_df["Section"] == "To Go"]
+      .groupby("Reason", as_index=True)["Value"]
+      .sum()
+      .astype(int)
 )
-df_detail = df.merge(store_totals, on=["Area Director","Store"], how="left") \
-              .merge(ad_totals, on="Area Director", how="left")
+att_delivery = (
+    att_df[att_df["Section"] == "Delivery"]
+      .groupby("Reason", as_index=True)["Value"]
+      .sum()
+      .astype(int)
+)
+att_total = (
+    att_df.groupby("Reason", as_index=True)["Value"]
+      .sum()
+      .astype(int)
+)
 
-# ───────────────── DISPLAY (collapsible AD sections) ─────────────────
-st.success("✅ Parsed with strict labels & TOTAL-aware bins.")
-st.subheader(f"Results for period: {sel_col}")
+reason_totals_attitude = pd.DataFrame({
+    "Dine-In": _order_series_att(att_dinein),
+    "To Go": _order_series_att(att_togo),
+    "Delivery": _order_series_att(att_delivery),
+    "Total": _order_series_att(att_total),
+}).fillna(0).astype(int)
+reason_totals_attitude.loc["— Grand Total —"] = reason_totals_attitude.sum(numeric_only=True)
 
-col1, col2 = st.columns([1, 3])
-with col1:
-    expand_all = st.toggle("Expand all Area Directors", value=False, help="Show all stores & reason pivots for each AD")
-
-with col2:
-    ad_summary = ad_totals.rename(columns={"Store Total": "AD Total"}).sort_values("Area Director")
-    st.dataframe(ad_summary, use_container_width=True, height=min(400, 60 + 28 * max(2, len(ad_summary))))
-
-ads = df_detail["Area Director"].dropna().unique().tolist()
-for ad in ads:
-    sub = df_detail[df_detail["Area Director"]==ad].copy()
-    ad_total_val = int(sub['AD Total'].iloc[0])
-    with st.expander(f"👤 {ad} — AD Total: {ad_total_val}", expanded=expand_all):
-        stores = sub["Store"].dropna().unique().tolist()
-        for store in stores:
-            substore = sub[sub["Store"]==store].copy()
-            store_total = int(substore["Store Total"].iloc[0])
-            st.markdown(f"**{store}**  — Store Total: **{store_total}**")
-            # Show both categories’ reasons for visibility
-            show_reasons = MISSING_REASONS + ATTITUDE_REASONS
-            pivot = (
-                substore[substore["Reason"].isin(show_reasons)]
-                .pivot_table(index="Reason", columns="Section", values="Value", aggfunc="sum", fill_value=0)
-                .reindex(show_reasons)
-            )
-            pivot["Total"] = pivot.sum(axis=1)
-            st.dataframe(pivot, use_container_width=True)
-
-# ───────────────── REASON TOTALS (copy-friendly, Missing only) ─────────────────
-st.header("4) Reason totals — To-go Missing Complaints (selected period)")
-st.caption("To-Go and Delivery only, for the seven Missing reasons (matches your spreadsheet flow).")
-st.dataframe(reason_totals, use_container_width=True)
+st.dataframe(reason_totals_attitude, use_container_width=True)
 
 # ───────────────── CATEGORY SUMMARIES ─────────────────
-def category_summary_block(category_name: str, allowed_sections: set):
-    st.header(f"4a) Category summary — {category_name}")
+def category_summary_block(number_label: str, category_name: str, allowed_sections: set):
+    st.header(f"{number_label}) Category summary — {category_name}")
     subset = df[(df["Category"] == category_name) & (df["Section"].isin(allowed_sections))]
     if subset.empty:
         st.info(f"No rows currently mapped to “{category_name}”.")
@@ -523,12 +561,12 @@ def category_summary_block(category_name: str, allowed_sections: set):
     )
     return cat_ad_totals, cat_store_totals, cat_grand_total
 
-# 4a — To-go Missing Complaints (To-Go + Delivery only)
-tgc_ad_totals, tgc_store_totals, tgc_grand = category_summary_block("To-go Missing Complaints", {"To Go","Delivery"})
-# 4b — Attitude (all segments)
-att_ad_totals, att_store_totals, att_grand = category_summary_block("Attitude", {"To Go","Delivery","Dine-In"})
-# 4c — Other (placeholder; no labels mapped yet)
-oth_ad_totals, oth_store_totals, oth_grand = category_summary_block("Other", {"To Go","Delivery","Dine-In"})
+# 4c — To-go Missing Complaints (To-Go + Delivery only)
+tgc_ad_totals, tgc_store_totals, tgc_grand = category_summary_block("4c", "To-go Missing Complaints", {"To Go","Delivery"})
+# 4d — Attitude (all segments)
+att_ad_totals, att_store_totals, att_grand = category_summary_block("4d", "Attitude", {"To Go","Delivery","Dine-In"})
+# 4e — Other (placeholder)
+oth_ad_totals, oth_store_totals, oth_grand = category_summary_block("4e", "Other", {"To Go","Delivery","Dine-In"})
 
 # ───────────────── DRILL-DOWN / EVIDENCE ─────────────────
 with st.expander("🔎 Drill-down: show exact values per header for any AD & Store"):
@@ -562,9 +600,10 @@ def compute_delta_vs_prior(sel: str) -> Optional[Tuple[str, int]]:
     if idx == 0:
         return None
     prior = ordered_headers[idx - 1]
-    cur_total = int(missing_df["Value"].sum())  # email focuses on the same Missing scope
-    # Prior period total under same scope
+    # Email focuses on Missing (To Go + Delivery)
+    cur_total = int(missing_df["Value"].sum())
     rows_prior = []
+    # rebuild prior under same scope
     for ad, stores in raw_data.items():
         for store, sections in stores.items():
             for section, reason_map in sections.items():
@@ -577,7 +616,7 @@ def compute_delta_vs_prior(sel: str) -> Optional[Tuple[str, int]]:
     return prior, cur_total - prior_total
 
 top3 = (
-    reason_totals.drop(index="— Grand Total —", errors="ignore")
+    reason_totals_missing.drop(index="— Grand Total —", errors="ignore")
     .sort_values("Total", ascending=False)
     .head(3)
     .index.tolist()
@@ -642,61 +681,45 @@ st.download_button(
 
 # ───────────────── EXPORTS ─────────────────
 st.header("6) Export results")
-# Detail CSV (all rows captured for both categories)
+
+# Detail CSV (all rows captured)
 csv = df_detail.to_csv(index=False)
 st.download_button("📥 Download detail CSV", data=csv, file_name=f"ad_store_detail_{sel_col.replace(' ','_')}.csv", mime="text/csv")
 
-# Category CSVs
-if tgc_ad_totals is not None:
-    st.download_button(
-        "📥 Download Category AD Totals — To-go Missing (CSV)",
-        data=tgc_ad_totals.to_csv(index=False).encode("utf-8"),
-        file_name=f"category_togo_missing_ad_{sel_col.replace(' ','_')}.csv",
-        mime="text/csv",
-    )
-if tgc_store_totals is not None:
-    st.download_button(
-        "📥 Download Category Store Totals — To-go Missing (CSV)",
-        data=tgc_store_totals.to_csv(index=False).encode("utf-8"),
-        file_name=f"category_togo_missing_store_{sel_col.replace(' ','_')}.csv",
-        mime="text/csv",
-    )
-if att_ad_totals is not None:
-    st.download_button(
-        "📥 Download Category AD Totals — Attitude (CSV)",
-        data=att_ad_totals.to_csv(index=False).encode("utf-8"),
-        file_name=f"category_attitude_ad_{sel_col.replace(' ','_')}.csv",
-        mime="text/csv",
-    )
-if att_store_totals is not None:
-    st.download_button(
-        "📥 Download Category Store Totals — Attitude (CSV)",
-        data=att_store_totals.to_csv(index=False).encode("utf-8"),
-        file_name=f"category_attitude_store_{sel_col.replace(' ','_')}.csv",
-        mime="text/csv",
-    )
-if oth_ad_totals is not None:
-    st.download_button(
-        "📥 Download Category AD Totals — Other (CSV)",
-        data=oth_ad_totals.to_csv(index=False).encode("utf-8"),
-        file_name=f"category_other_ad_{sel_col.replace(' ','_')}.csv",
-        mime="text/csv",
-    )
-if oth_store_totals is not None:
-    st.download_button(
-        "📥 Download Category Store Totals — Other (CSV)",
-        data=oth_store_totals.to_csv(index=False).encode("utf-8"),
-        file_name=f"category_other_store_{sel_col.replace(' ','_')}.csv",
-        mime="text/csv",
-    )
+# Reason totals CSVs
+st.download_button(
+    "📥 Download Reason Totals — Missing (CSV)",
+    data=reason_totals_missing.to_csv().encode("utf-8"),
+    file_name=f"reason_totals_missing_{sel_col.replace(' ','_')}.csv",
+    mime="text/csv"
+)
+st.download_button(
+    "📥 Download Reason Totals — Attitude (CSV)",
+    data=reason_totals_attitude.to_csv().encode("utf-8"),
+    file_name=f"reason_totals_attitude_{sel_col.replace(' ','_')}.csv",
+    mime="text/csv"
+)
 
-# Excel (All + Category sheets)
+# Category CSVs
+def maybe_dl(df_in, label, fname):
+    if df_in is not None:
+        st.download_button(label, data=df_in.to_csv(index=False).encode("utf-8"), file_name=fname, mime="text/csv")
+
+maybe_dl(tgc_ad_totals,    "📥 Category AD Totals — To-go Missing (CSV)", f"category_togo_missing_ad_{sel_col.replace(' ','_')}.csv")
+maybe_dl(tgc_store_totals, "📥 Category Store Totals — To-go Missing (CSV)", f"category_togo_missing_store_{sel_col.replace(' ','_')}.csv")
+maybe_dl(att_ad_totals,    "📥 Category AD Totals — Attitude (CSV)", f"category_attitude_ad_{sel_col.replace(' ','_')}.csv")
+maybe_dl(att_store_totals, "📥 Category Store Totals — Attitude (CSV)", f"category_attitude_store_{sel_col.replace(' ','_')}.csv")
+maybe_dl(oth_ad_totals,    "📥 Category AD Totals — Other (CSV)", f"category_other_ad_{sel_col.replace(' ','_')}.csv")
+maybe_dl(oth_store_totals, "📥 Category Store Totals — Other (CSV)", f"category_other_store_{sel_col.replace(' ','_')}.csv")
+
+# Excel (All + Reason Totals + Category sheets)
 buff = io.BytesIO()
 with pd.ExcelWriter(buff, engine="openpyxl") as writer:
     df_detail.to_excel(writer, index=False, sheet_name="Detail")
-    store_totals.to_excel(writer, index=False, sheet_name="Store Totals")
     ad_totals.to_excel(writer, index=False, sheet_name="AD Totals")
-    reason_totals.to_excel(writer, sheet_name="Reason Totals (Missing)")
+    store_totals.to_excel(writer, index=False, sheet_name="Store Totals")
+    reason_totals_missing.to_excel(writer, sheet_name="Reason Totals (Missing)")
+    reason_totals_attitude.to_excel(writer, sheet_name="Reason Totals (Attitude)")
 
     (tgc_ad_totals if tgc_ad_totals is not None else pd.DataFrame(columns=["Area Director","AD Category Total"])) \
         .to_excel(writer, index=False, sheet_name="Cat-ToGoMissing AD Totals")
@@ -712,7 +735,7 @@ with pd.ExcelWriter(buff, engine="openpyxl") as writer:
         .to_excel(writer, index=False, sheet_name="Cat-Other Store")
 
 st.download_button(
-    "📥 Download Excel (All + Category Sheets)",
+    "📥 Download Excel (All Sheets)",
     data=buff.getvalue(),
     file_name=f"ad_store_{sel_col.replace(' ','_')}.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"

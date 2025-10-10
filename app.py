@@ -1,4 +1,5 @@
-# Greeno Big Three v1.6.1 — strict parser (TOTAL-aware bins, left-label) + collapsible ADs + reason totals + text-only Eric email
+# Greeno Big Three v1.6.2 — strict parser + collapsible ADs + reason totals + text-only Eric email
+# + Category system: "To-go Missing Complaints" wired; "Attitude" & "Other" placeholders
 import io, os, re, base64, statistics
 from collections import defaultdict
 from typing import Dict, List, Tuple, Optional
@@ -11,7 +12,7 @@ except Exception:
     pdfplumber = None
 
 # ───────────────── HEADER / THEME ─────────────────
-st.set_page_config(page_title="Greeno Big Three v1.6.1", layout="wide")
+st.set_page_config(page_title="Greeno Big Three v1.6.2", layout="wide")
 
 logo_path = "greenosu.webp"
 if os.path.exists(logo_path):
@@ -29,10 +30,10 @@ st.markdown(f"""
 ">
   {logo_html}
   <div style="display:flex; flex-direction:column; justify-content:center;">
-      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.6.1</h1>
+      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.6.2</h1>
       <div style="height:5px; background-color:#F44336; width:300px; margin-top:10px; border-radius:3px;"></div>
       <p style="margin:10px 0 0; opacity:.9; font-size:1.05rem;">
-        Strict 7-labels + TOTAL-aware bins · Collapsible AD sections · Reason totals · Text-only Eric email
+        Strict 7-labels + TOTAL-aware bins · Collapsible AD sections · Reason totals · Text-only Eric email · Category summaries
       </p>
   </div>
 </div>
@@ -83,6 +84,7 @@ SECTION_DELIV  = re.compile(r"^\s*Delivery\s*$", re.IGNORECASE)
 SECTION_DINEIN = re.compile(r"^\s*Dine[\s-]?In\s*$", re.IGNORECASE)
 HEADER_RX      = re.compile(r"\bP(?:1[0-2]|[1-9])\s+(?:2[0-9])\b")
 
+# Canonical reasons we currently parse
 CANONICAL = [
     "Missing food",
     "Order wrong",
@@ -96,6 +98,7 @@ CANONICAL = [
 def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", s.lower()).strip()
 
+# Exact aliases → canonical (strict)
 REASON_ALIASES_NORM = {
     _norm("Missing Item (Food)"):        "Missing food",
     _norm("Order Wrong"):                "Order wrong",
@@ -394,7 +397,21 @@ if df.empty:
     st.warning("No matching To Go/Delivery reasons found for the selected period.")
     st.stop()
 
-# ---- Reason totals (copy-friendly) ----
+# ───────────────── CATEGORY MAPPING ─────────────────
+CATEGORY_TOGO_MISSING = "To-go Missing Complaints"
+CATEGORY_ATTITUDE     = "Attitude"   # placeholder
+CATEGORY_OTHER        = "Other"      # placeholder
+
+# Current 7 reasons → Missing Complaints
+CATEGORY_MAP = {r: CATEGORY_TOGO_MISSING for r in CANONICAL}
+
+# (Placeholders): add label strings here later when we define "Attitude"/"Other" mappings, e.g.:
+# CATEGORY_MAP.update({"Rude staff": CATEGORY_ATTITUDE, "Unfriendly service": CATEGORY_ATTITUDE})
+# CATEGORY_MAP.update({"Long wait": CATEGORY_OTHER, "Cold food": CATEGORY_OTHER})
+
+df["Category"] = df["Reason"].map(CATEGORY_MAP).fillna("Unassigned")
+
+# ---- Reason totals (selected period) ----
 def _order_series(s: pd.Series) -> pd.Series:
     return s.reindex(CANONICAL)
 
@@ -469,6 +486,46 @@ st.header("4) Reason totals (selected period)")
 st.caption("Use this table to copy values into your spreadsheet (e.g., your P# column).")
 st.dataframe(reason_totals, use_container_width=True)
 
+# ───────────────── CATEGORY SUMMARIES ─────────────────
+def category_summary_block(category_name: str):
+    st.header(f"4a) Category summary — {category_name}")
+    subset = df[df["Category"] == category_name]
+    if subset.empty:
+        st.info(f"No rows currently mapped to “{category_name}”. (This is expected for placeholders until we define labels.)")
+        return None, None, 0
+    cat_store_totals = (
+        subset.groupby(["Area Director", "Store"], as_index=False)["Value"]
+              .sum().rename(columns={"Value": "Category Total"})
+    )
+    cat_ad_totals = (
+        cat_store_totals.groupby("Area Director", as_index=False)["Category Total"]
+                        .sum().rename(columns={"Category Total": "AD Category Total"})
+    )
+    cat_grand_total = int(cat_store_totals["Category Total"].sum())
+    colA, colB = st.columns([1, 3])
+    with colA:
+        st.metric("Grand Total (Category)", cat_grand_total)
+    with colB:
+        st.dataframe(
+            cat_ad_totals.sort_values("Area Director"),
+            use_container_width=True,
+            height=min(400, 60 + 28 * max(2, len(cat_ad_totals)))
+        )
+    st.subheader("Per-Store Category Totals")
+    st.caption(f"Each store’s total for “{category_name}” (To Go + Delivery) in the selected period.")
+    st.dataframe(
+        cat_store_totals.sort_values(["Area Director", "Store"]),
+        use_container_width=True,
+    )
+    return cat_ad_totals, cat_store_totals, cat_grand_total
+
+# 4a — To-go Missing Complaints (fully wired)
+tgc_ad_totals, tgc_store_totals, tgc_grand = category_summary_block(CATEGORY_TOGO_MISSING)
+# 4b — Attitude (placeholder)
+att_ad_totals, att_store_totals, att_grand = category_summary_block(CATEGORY_ATTITUDE)
+# 4c — Other (placeholder)
+oth_ad_totals, oth_store_totals, oth_grand = category_summary_block(CATEGORY_OTHER)
+
 # ───────────────── DRILL-DOWN / EVIDENCE ─────────────────
 with st.expander("🔎 Drill-down: show exact values per header for any AD & Store"):
     if raw_data:
@@ -510,9 +567,7 @@ def compute_delta_vs_prior(sel: str) -> Optional[Tuple[str, int]]:
                     continue
                 all_per_header = reason_map.get("__all__", {})
                 for canon in CANONICAL:
-                    v = 0
-                    if canon in all_per_header and prior in all_per_header[canon]:
-                        v = int(all_per_header[canon][prior])
+                    v = int(all_per_header.get(canon, {}).get(prior, 0))
                     rows_prior.append(v)
     prior_total = int(sum(rows_prior)) if rows_prior else 0
     return prior, cur_total - prior_total
@@ -583,17 +638,78 @@ st.download_button(
 
 # ───────────────── EXPORTS ─────────────────
 st.header("6) Export results")
+# Detail CSV
 csv = df_detail.to_csv(index=False)
 st.download_button("📥 Download detail CSV", data=csv, file_name=f"ad_store_detail_{sel_col.replace(' ','_')}.csv", mime="text/csv")
 
+# Category CSVs (export even if empty to keep process consistent)
+if tgc_ad_totals is not None:
+    st.download_button(
+        "📥 Download Category AD Totals — To-go Missing (CSV)",
+        data=tgc_ad_totals.to_csv(index=False).encode("utf-8"),
+        file_name=f"category_togo_missing_ad_{sel_col.replace(' ','_')}.csv",
+        mime="text/csv",
+    )
+if tgc_store_totals is not None:
+    st.download_button(
+        "📥 Download Category Store Totals — To-go Missing (CSV)",
+        data=tgc_store_totals.to_csv(index=False).encode("utf-8"),
+        file_name=f"category_togo_missing_store_{sel_col.replace(' ','_')}.csv",
+        mime="text/csv",
+    )
+if att_ad_totals is not None:
+    st.download_button(
+        "📥 Download Category AD Totals — Attitude (CSV)",
+        data=att_ad_totals.to_csv(index=False).encode("utf-8"),
+        file_name=f"category_attitude_ad_{sel_col.replace(' ','_')}.csv",
+        mime="text/csv",
+    )
+if att_store_totals is not None:
+    st.download_button(
+        "📥 Download Category Store Totals — Attitude (CSV)",
+        data=att_store_totals.to_csv(index=False).encode("utf-8"),
+        file_name=f"category_attitude_store_{sel_col.replace(' ','_')}.csv",
+        mime="text/csv",
+    )
+if oth_ad_totals is not None:
+    st.download_button(
+        "📥 Download Category AD Totals — Other (CSV)",
+        data=oth_ad_totals.to_csv(index=False).encode("utf-8"),
+        file_name=f"category_other_ad_{sel_col.replace(' ','_')}.csv",
+        mime="text/csv",
+    )
+if oth_store_totals is not None:
+    st.download_button(
+        "📥 Download Category Store Totals — Other (CSV)",
+        data=oth_store_totals.to_csv(index=False).encode("utf-8"),
+        file_name=f"category_other_store_{sel_col.replace(' ','_')}.csv",
+        mime="text/csv",
+    )
+
+# Excel (All + Category sheets)
 buff = io.BytesIO()
 with pd.ExcelWriter(buff, engine="openpyxl") as writer:
     df_detail.to_excel(writer, index=False, sheet_name="Detail")
     store_totals.to_excel(writer, index=False, sheet_name="Store Totals")
     ad_totals.to_excel(writer, index=False, sheet_name="AD Totals")
     reason_totals.to_excel(writer, sheet_name="Reason Totals")
+
+    # Category sheets (write empty placeholders if None to keep tab structure stable)
+    (tgc_ad_totals if tgc_ad_totals is not None else pd.DataFrame(columns=["Area Director","AD Category Total"])) \
+        .to_excel(writer, index=False, sheet_name="Cat-ToGoMissing AD Totals")
+    (tgc_store_totals if tgc_store_totals is not None else pd.DataFrame(columns=["Area Director","Store","Category Total"])) \
+        .to_excel(writer, index=False, sheet_name="Cat-ToGoMissing Store")
+    (att_ad_totals if att_ad_totals is not None else pd.DataFrame(columns=["Area Director","AD Category Total"])) \
+        .to_excel(writer, index=False, sheet_name="Cat-Attitude AD Totals")
+    (att_store_totals if att_store_totals is not None else pd.DataFrame(columns=["Area Director","Store","Category Total"])) \
+        .to_excel(writer, index=False, sheet_name="Cat-Attitude Store")
+    (oth_ad_totals if oth_ad_totals is not None else pd.DataFrame(columns=["Area Director","AD Category Total"])) \
+        .to_excel(writer, index=False, sheet_name="Cat-Other AD Totals")
+    (oth_store_totals if oth_store_totals is not None else pd.DataFrame(columns=["Area Director","Store","Category Total"])) \
+        .to_excel(writer, index=False, sheet_name="Cat-Other Store")
+
 st.download_button(
-    "📥 Download Excel (Detail + Totals + Reason Totals)",
+    "📥 Download Excel (All + Category Sheets)",
     data=buff.getvalue(),
     file_name=f"ad_store_{sel_col.replace(' ','_')}.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"

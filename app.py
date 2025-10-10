@@ -1,6 +1,7 @@
-# Greeno Big Three v1.6.4 — strict parser (TOTAL-aware bins, left-label) +
+# Greeno Big Three v1.6.5 — strict parser (TOTAL-aware bins, left-label) +
 # collapsible ADs + reason totals (Missing + Attitude) + text-only Eric email +
 # Categories: To-go Missing Complaints (To-Go/Delivery) + Attitude (all segments) + Other (placeholder)
+# + Subtle alternating-row shading across tables & highlighted Grand Total rows
 import io, os, re, base64, statistics
 from collections import defaultdict
 from typing import Dict, List, Tuple, Optional
@@ -12,8 +13,33 @@ try:
 except Exception:
     pdfplumber = None
 
+# ───────────────── STYLING HELPERS ─────────────────
+def style_table(df: pd.DataFrame, highlight_grand_total: bool = True) -> "pd.io.formats.style.Styler":
+    """
+    Adds alternating row shading and (optionally) highlights the '— Grand Total —' row.
+    Safe for any dataframe (will just ignore the highlight if that row isn't present).
+    """
+    # Alternating row background (applied first)
+    def zebra(series):
+        # series represents a column; repeat row pattern for each column
+        return ["background-color: #F8F9FA" if i % 2 == 0 else "background-color: #E9ECEF" for i, _ in enumerate(series)]
+
+    sty = df.style.apply(zebra, axis=0).set_properties(
+        **{"border-color": "#DDD", "border-width": "0.5px", "border-style": "solid"}
+    )
+
+    # Then overlay the Grand Total highlight so it takes precedence
+    if highlight_grand_total:
+        def highlight_total(row):
+            if str(row.name) == "— Grand Total —":
+                return ["background-color: #FFECB3; font-weight: 700;"] * len(row)
+            return [""] * len(row)
+        sty = sty.apply(highlight_total, axis=1)
+
+    return sty
+
 # ───────────────── HEADER / THEME ─────────────────
-st.set_page_config(page_title="Greeno Big Three v1.6.4", layout="wide")
+st.set_page_config(page_title="Greeno Big Three v1.6.5", layout="wide")
 
 logo_path = "greenosu.webp"
 if os.path.exists(logo_path):
@@ -31,10 +57,10 @@ st.markdown(f"""
 ">
   {logo_html}
   <div style="display:flex; flex-direction:column; justify-content:center;">
-      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.6.4</h1>
+      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.6.5</h1>
       <div style="height:5px; background-color:#F44336; width:300px; margin-top:10px; border-radius:3px;"></div>
       <p style="margin:10px 0 0; opacity:.9; font-size:1.05rem;">
-        Strict parsing + TOTAL-aware bins · Collapsible AD sections · Reason totals (Missing + Attitude) · Text-only Eric email · Category summaries
+        Strict parsing + TOTAL-aware bins · Collapsible AD sections · Reason totals (Missing + Attitude) · Text-only Eric email · Category summaries · Styled tables
       </p>
   </div>
 </div>
@@ -420,7 +446,8 @@ with col2:
           .groupby("Area Director", as_index=False)["Value"].sum()
           .rename(columns={"Value":"AD Total"})
     )
-    st.dataframe(ad_totals.sort_values("Area Director"), use_container_width=True, height=min(400, 60 + 28 * max(2, len(ad_totals))))
+    st.dataframe(style_table(ad_totals, highlight_grand_total=False), use_container_width=True,
+                 height=min(400, 60 + 28 * max(2, len(ad_totals))))
 
 # per-store + per-AD totals (all rows)
 store_totals = (
@@ -428,7 +455,7 @@ store_totals = (
       .rename(columns={"Value":"Store Total"})
 )
 df_detail = df.merge(store_totals, on=["Area Director","Store"], how="left") \
-              .merge(ad_totals, on="Area Director", how="left")
+              .merge(ad_totals, on="Area Director", how="left"))
 
 ads = df_detail["Area Director"].dropna().unique().tolist()
 for ad in ads:
@@ -447,7 +474,7 @@ for ad in ads:
                 .reindex(show_reasons)
             )
             pivot["Total"] = pivot.sum(axis=1)
-            st.dataframe(pivot, use_container_width=True)
+            st.dataframe(style_table(pivot, highlight_grand_total=False), use_container_width=True)
 
 # ───────────────── REASON TOTALS — Missing ─────────────────
 st.header("4) Reason totals — To-go Missing Complaints (selected period)")
@@ -461,19 +488,16 @@ def _order_series_missing(s: pd.Series) -> pd.Series:
 tot_to_go = (
     missing_df[missing_df["Section"] == "To Go"]
       .groupby("Reason", as_index=True)["Value"]
-      .sum()
-      .astype(int)
+      .sum().astype(int)
 )
 tot_delivery = (
     missing_df[missing_df["Section"] == "Delivery"]
       .groupby("Reason", as_index=True)["Value"]
-      .sum()
-      .astype(int)
+      .sum().astype(int)
 )
 tot_overall = (
     missing_df.groupby("Reason", as_index=True)["Value"]
-      .sum()
-      .astype(int)
+      .sum().astype(int)
 )
 
 reason_totals_missing = pd.DataFrame({
@@ -483,7 +507,7 @@ reason_totals_missing = pd.DataFrame({
 }).fillna(0).astype(int)
 reason_totals_missing.loc["— Grand Total —"] = reason_totals_missing.sum(numeric_only=True)
 
-st.dataframe(reason_totals_missing, use_container_width=True)
+st.dataframe(style_table(reason_totals_missing), use_container_width=True)
 
 # ───────────────── REASON TOTALS — Attitude ─────────────────
 st.header("4b) Reason totals — Attitude (selected period)")
@@ -497,25 +521,21 @@ def _order_series_att(s: pd.Series) -> pd.Series:
 att_dinein = (
     att_df[att_df["Section"] == "Dine-In"]
       .groupby("Reason", as_index=True)["Value"]
-      .sum()
-      .astype(int)
+      .sum().astype(int)
 )
 att_togo = (
     att_df[att_df["Section"] == "To Go"]
       .groupby("Reason", as_index=True)["Value"]
-      .sum()
-      .astype(int)
+      .sum().astype(int)
 )
 att_delivery = (
     att_df[att_df["Section"] == "Delivery"]
       .groupby("Reason", as_index=True)["Value"]
-      .sum()
-      .astype(int)
+      .sum().astype(int)
 )
 att_total = (
     att_df.groupby("Reason", as_index=True)["Value"]
-      .sum()
-      .astype(int)
+      .sum().astype(int)
 )
 
 reason_totals_attitude = pd.DataFrame({
@@ -526,7 +546,7 @@ reason_totals_attitude = pd.DataFrame({
 }).fillna(0).astype(int)
 reason_totals_attitude.loc["— Grand Total —"] = reason_totals_attitude.sum(numeric_only=True)
 
-st.dataframe(reason_totals_attitude, use_container_width=True)
+st.dataframe(style_table(reason_totals_attitude), use_container_width=True)
 
 # ───────────────── CATEGORY SUMMARIES ─────────────────
 def category_summary_block(number_label: str, category_name: str, allowed_sections: set):
@@ -548,17 +568,12 @@ def category_summary_block(number_label: str, category_name: str, allowed_sectio
     with colA:
         st.metric("Grand Total (Category)", cat_grand_total)
     with colB:
-        st.dataframe(
-            cat_ad_totals.sort_values("Area Director"),
-            use_container_width=True,
-            height=min(400, 60 + 28 * max(2, len(cat_ad_totals)))
-        )
+        st.dataframe(style_table(cat_ad_totals, highlight_grand_total=False),
+                     use_container_width=True,
+                     height=min(400, 60 + 28 * max(2, len(cat_ad_totals))))
     st.subheader("Per-Store Category Totals")
     st.caption(f"Each store’s total for “{category_name}” in the selected period.")
-    st.dataframe(
-        cat_store_totals.sort_values(["Area Director", "Store"]),
-        use_container_width=True,
-    )
+    st.dataframe(style_table(cat_store_totals, highlight_grand_total=False), use_container_width=True)
     return cat_ad_totals, cat_store_totals, cat_grand_total
 
 # 4c — To-go Missing Complaints (To-Go + Delivery only)
@@ -583,7 +598,7 @@ with st.expander("🔎 Drill-down: show exact values per header for any AD & Sto
                 row[h] = int(per.get(r, {}).get(h, 0))
             mat.append(row)
         df_mat = pd.DataFrame(mat).set_index("Reason")
-        st.dataframe(df_mat, use_container_width=True)
+        st.dataframe(style_table(df_mat, highlight_grand_total=False), use_container_width=True)
         st.caption("Verifies the exact numbers parsed under each period header for your chosen store/section.")
     else:
         st.caption("No data parsed.")
@@ -617,9 +632,7 @@ def compute_delta_vs_prior(sel: str) -> Optional[Tuple[str, int]]:
 
 top3 = (
     reason_totals_missing.drop(index="— Grand Total —", errors="ignore")
-    .sort_values("Total", ascending=False)
-    .head(3)
-    .index.tolist()
+    .sort_values("Total", ascending=False).head(3).index.tolist()
 )
 
 delta_info = compute_delta_vs_prior(sel_col)
@@ -700,7 +713,7 @@ st.download_button(
     mime="text/csv"
 )
 
-# Category CSVs
+# Category CSV helper
 def maybe_dl(df_in, label, fname):
     if df_in is not None:
         st.download_button(label, data=df_in.to_csv(index=False).encode("utf-8"), file_name=fname, mime="text/csv")

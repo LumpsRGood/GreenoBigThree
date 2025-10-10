@@ -455,7 +455,7 @@ store_totals = (
       .rename(columns={"Value":"Store Total"})
 )
 df_detail = df.merge(store_totals, on=["Area Director","Store"], how="left") \
-              .merge(ad_totals, on="Area Director", how="left"))
+              .merge(ad_totals, on="Area Director", how="left")
 
 ads = df_detail["Area Director"].dropna().unique().tolist()
 for ad in ads:

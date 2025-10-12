@@ -1,7 +1,8 @@
-# Greeno Big Three v1.7.1 — strict parser (TOTAL-aware bins, left-label) +
-# Quick Glance scoreboard + reason totals (Missing + Attitude + Other) +
+# Greeno Big Three v1.7.2 — strict parser (TOTAL-aware bins, left-label) +
+# Quick Glance scoreboard (dynamic green/red border accents; lower = better) +
+# Reason totals (Missing + Attitude + Other) +
 # Period Change Summary (text, dynamic height) +
-# Historical context (lower = better) with highlighted Current cell +
+# Historical context (lower = better) with highlighted Current cell + KPI cards with dynamic accents +
 # Collapsible ADs + High-contrast tables + Single Excel export
 # Categories: To-go Missing Complaints (To-Go/Delivery) + Attitude (all segments) + Other (all segments)
 import io, os, re, base64, statistics
@@ -54,7 +55,7 @@ def style_table(df: pd.DataFrame, highlight_grand_total: bool = True) -> "pd.io.
     return sty
 
 # ───────────────── HEADER / THEME ─────────────────
-st.set_page_config(page_title="Greeno Big Three v1.7.1", layout="wide")
+st.set_page_config(page_title="Greeno Big Three v1.7.2", layout="wide")
 
 logo_path = "greenosu.webp"
 if os.path.exists(logo_path):
@@ -73,7 +74,7 @@ st.markdown(
 ">
   {logo_html}
   <div style="display:flex; flex-direction:column; justify-content:center;">
-      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.7.1</h1>
+      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.7.2</h1>
       <div style="height:5px; background-color:#F44336; width:300px; margin-top:10px; border-radius:3px;"></div>
   </div>
 </div>
@@ -192,7 +193,6 @@ ALIASES_OTHER = {
     _norm("No/Poor Apology"):                                        "No/poor apology",
 }
 
-# FIXED: removed stray closing brace
 REASON_ALIASES_NORM = {**ALIASES_MISSING, **ALIASES_ATTITUDE, **ALIASES_OTHER}
 
 def normalize_reason(raw: str) -> Optional[str]:
@@ -446,6 +446,20 @@ def _total_for(period_label: str, reasons: list[str], sections: set[str]) -> int
                     total += int(per.get(r, {}).get(period_label, 0))
     return int(total)
 
+def _totals_by_period(reasons: list[str], sections: set[str]) -> Dict[str, int]:
+    """Return {period -> total} for a category across all ADs/stores."""
+    res = {p: 0 for p in ordered_headers}
+    for ad, stores in raw_data.items():
+        for store, sects in stores.items():
+            for sec_name, reason_map in sects.items():
+                if sec_name not in sections:
+                    continue
+                per = reason_map.get("__all__", {})
+                for r in reasons:
+                    for p in ordered_headers:
+                        res[p] += int(per.get(r, {}).get(p, 0))
+    return res
+
 # Prior period (if any)
 try:
     cur_idx = ordered_headers.index(sel_col)
@@ -475,24 +489,79 @@ def fmt_delta(a: int, b: int, has_prior: bool) -> str:
     diff = a - b
     return f"{diff:+d}"
 
-# ───────────────── QUICK GLANCE SCOREBOARD (inverse colors: lower = better) ─────────────────
-c1, c2, c3, c4 = st.columns(4)
-with c1:
-    st.metric("Overall (all categories)", overall_cur,
-              fmt_delta(overall_cur, overall_prv, prior_label is not None),
-              delta_color="inverse")
-with c2:
-    st.metric("To-go Missing Complaints", tot_missing_cur,
-              fmt_delta(tot_missing_cur, tot_missing_prv, prior_label is not None),
-              delta_color="inverse")
-with c3:
-    st.metric("Attitude", tot_att_cur,
-              fmt_delta(tot_att_cur, tot_att_prv, prior_label is not None),
-              delta_color="inverse")
-with c4:
-    st.metric("Other", tot_other_cur,
-              fmt_delta(tot_other_cur, tot_other_prv, prior_label is not None),
-              delta_color="inverse")
+# Determine best/worst across ALL periods for each category + overall (lower = better)
+missing_series = _totals_by_period(MISSING_REASONS,  missing_sections)
+att_series     = _totals_by_period(ATTITUDE_REASONS, att_sections)
+other_series   = _totals_by_period(OTHER_REASONS,    other_sections)
+overall_series = {p: missing_series[p] + att_series[p] + other_series[p] for p in ordered_headers}
+
+def best_worst(series: Dict[str, int]) -> Tuple[Tuple[str,int], Tuple[str,int]]:
+    best = min(series.items(), key=lambda kv: kv[1])
+    worst = max(series.items(), key=lambda kv: kv[1])
+    return best, worst
+
+(best_overall, worst_overall) = best_worst(overall_series)
+(best_missing, worst_missing) = best_worst(missing_series)
+(best_att,     worst_att)     = best_worst(att_series)
+(best_other,   worst_other)   = best_worst(other_series)
+
+# Assign dynamic classes: 'best' if current equals global best, 'worst' if equals global worst
+def tile_class(current_val: int, best_tuple: Tuple[str,int], worst_tuple: Tuple[str,int]) -> str:
+    if current_val == best_tuple[1]:
+        return " best"
+    if current_val == worst_tuple[1]:
+        return " worst"
+    return ""
+
+score_css = """
+<style>
+.score-wrap{display:flex;gap:16px;margin:10px 0 20px 0}
+.score{flex:1;background:#1113;border:2px solid #2a2f36;border-radius:12px;padding:14px 18px;text-align:center}
+.score.best{border-color:#4CAF50}
+.score.worst{border-color:#E53935}
+.score h4{margin:0 0 6px 0;font-weight:600;font-size:0.95rem;color:#cfd8e3}
+.score .num{font-size:2.8rem;line-height:1.1;font-weight:700;color:#fff;margin:0}
+.score .delta{margin-top:4px;font-size:1rem;color:#9fb3c8}
+@media (max-width:900px){.score-wrap{flex-direction:column}}
+</style>
+"""
+st.markdown(score_css, unsafe_allow_html=True)
+
+overall_delta = fmt_delta(overall_cur, overall_prv, prior_label is not None)
+miss_delta = fmt_delta(tot_missing_cur, tot_missing_prv, prior_label is not None)
+att_delta  = fmt_delta(tot_att_cur,     tot_att_prv,     prior_label is not None)
+oth_delta  = fmt_delta(tot_other_cur,   tot_other_prv,   prior_label is not None)
+
+overall_cls = tile_class(overall_cur, best_overall, worst_overall)
+missing_cls = tile_class(tot_missing_cur, best_missing, worst_missing)
+att_cls     = tile_class(tot_att_cur,     best_att,     worst_att)
+other_cls   = tile_class(tot_other_cur,   best_other,   worst_other)
+
+score_html = f"""
+<div class="score-wrap">
+  <div class="score{overall_cls}">
+    <h4>Overall (all categories)</h4>
+    <div class="num">{overall_cur}</div>
+    <div class="delta">{overall_delta}</div>
+  </div>
+  <div class="score{missing_cls}">
+    <h4>To-go Missing Complaints</h4>
+    <div class="num">{tot_missing_cur}</div>
+    <div class="delta">{miss_delta}</div>
+  </div>
+  <div class="score{att_cls}">
+    <h4>Attitude</h4>
+    <div class="num">{tot_att_cur}</div>
+    <div class="delta">{att_delta}</div>
+  </div>
+  <div class="score{other_cls}">
+    <h4>Other</h4>
+    <div class="num">{tot_other_cur}</div>
+    <div class="delta">{oth_delta}</div>
+  </div>
+</div>
+"""
+st.markdown(score_html, unsafe_allow_html=True)
 
 # ───────────────── BUILD RESULTS ─────────────────
 rows = []
@@ -792,7 +861,7 @@ else:
         mime="text/plain",
     )
 
-# ───────────────── 7) Historical context — highs/lows vs all periods ─────────────────
+# ───────────────── 7) Historical context — highs/lows vs all periods (lower = better) ─────────────────
 st.header("7) Historical context — highs/lows vs all periods (lower = better)")
 
 def build_reason_period_matrix(reasons: list[str], allowed_sections: set[str]) -> dict[str, dict[str, int]]:
@@ -821,8 +890,8 @@ def build_highlow_tables(reasons: list[str], allowed_sections: set[str], title: 
     worst_vals = {}
     for r in reasons:
         series = [(p, mat[p][r]) for p in ordered_headers]
-        best_period, best_val = min(series, key=lambda kv: kv[1])  # lowest value = best
-        worst_period, worst_val = max(series, key=lambda kv: kv[1])  # highest value = worst
+        best_period, best_val = min(series, key=lambda kv: kv[1])   # lowest value = best
+        worst_period, worst_val = max(series, key=lambda kv: kv[1]) # highest value = worst
         best_vals[r] = best_val
         worst_vals[r] = worst_val
         sorted_asc = sorted(series, key=lambda kv: kv[1])
@@ -852,20 +921,49 @@ def build_highlow_tables(reasons: list[str], allowed_sections: set[str], title: 
 
     # Category totals across periods (lower = better)
     totals_by_period = {p: sum(mat[p][r] for r in reasons) for p in ordered_headers}
-    best_p, best_total = min(totals_by_period.items(), key=lambda kv: kv[1])
+    best_p, best_total   = min(totals_by_period.items(), key=lambda kv: kv[1])
     worst_p, worst_total = max(totals_by_period.items(), key=lambda kv: kv[1])
     current_total = totals_by_period.get(sel_col, 0)
-    rank_list = sorted(totals_by_period.items(), key=lambda kv: kv[1])
+    rank_list = sorted(totals_by_period.items(), key=lambda kv: kv[1])  # ascending
     current_rank_idx = next(i + 1 for i, (p, v) in enumerate(rank_list) if p == sel_col)
 
-    # Fixed indentation and replaced metrics with visible periods inline
-    colA, colB, colC = st.columns(3)
-    with colA:
-        st.markdown(f"**Current total (lower is better):** {current_total}  ·  _{sel_col}_")
-    with colB:
-        st.markdown(f"**Best total (lowest):** {best_total}  ·  _{best_p}_")
-    with colC:
-        st.markdown(f"**Worst total (highest):** {worst_total}  ·  _{worst_p}_")
+    # KPI cards with dynamic accents for CURRENT when it ties best/worst
+    current_cls = " best" if current_total == best_total else (" worst" if current_total == worst_total else "")
+
+    card_css = """
+<style>
+.kpi-wrap{display:flex;gap:18px;margin:6px 0 8px 0}
+.kpi{flex:1;background:#1113;border:2px solid #2a2f36;border-radius:12px;padding:14px 16px;text-align:center}
+.kpi.best{border-color:#4CAF50}
+.kpi.worst{border-color:#E53935}
+.kpi h4{margin:0 0 6px 0;font-weight:600;font-size:0.95rem;color:#cfd8e3}
+.kpi .num{font-size:2.6rem;line-height:1.1;font-weight:700;color:#fff;margin:0}
+.kpi .sub{margin-top:4px;color:#9fb3c8;font-size:.95rem}
+@media (max-width:900px){.kpi-wrap{flex-direction:column}}
+</style>
+"""
+    st.markdown(card_css, unsafe_allow_html=True)
+
+    kpi_html = f"""
+<div class="kpi-wrap">
+  <div class="kpi{current_cls}">
+    <h4>Current total (lower is better)</h4>
+    <div class="num">{current_total}</div>
+    <div class="sub">{sel_col}</div>
+  </div>
+  <div class="kpi best">
+    <h4>Best total (lowest)</h4>
+    <div class="num">{best_total}</div>
+    <div class="sub">{best_p}</div>
+  </div>
+  <div class="kpi worst">
+    <h4>Worst total (highest)</h4>
+    <div class="num">{worst_total}</div>
+    <div class="sub">{worst_p}</div>
+  </div>
+</div>
+"""
+    st.markdown(kpi_html, unsafe_allow_html=True)
 
     st.caption(f"Current period rank: {current_rank_idx}/{num_periods} (1 = lowest/best)")
 

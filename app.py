@@ -475,15 +475,24 @@ def fmt_delta(a: int, b: int, has_prior: bool) -> str:
     diff = a - b
     return f"{diff:+d}"
 
+# ───────────────── QUICK GLANCE SCOREBOARD (inverse colors: lower = better) ─────────────────
 c1, c2, c3, c4 = st.columns(4)
 with c1:
-    st.metric("Overall (all categories)", overall_cur, fmt_delta(overall_cur, overall_prv, prior_label is not None))
+    st.metric("Overall (all categories)", overall_cur,
+              fmt_delta(overall_cur, overall_prv, prior_label is not None),
+              delta_color="inverse")
 with c2:
-    st.metric("To-go Missing Complaints", tot_missing_cur, fmt_delta(tot_missing_cur, tot_missing_prv, prior_label is not None))
+    st.metric("To-go Missing Complaints", tot_missing_cur,
+              fmt_delta(tot_missing_cur, tot_missing_prv, prior_label is not None),
+              delta_color="inverse")
 with c3:
-    st.metric("Attitude",                tot_att_cur,     fmt_delta(tot_att_cur,     tot_att_prv,     prior_label is not None))
+    st.metric("Attitude", tot_att_cur,
+              fmt_delta(tot_att_cur, tot_att_prv, prior_label is not None),
+              delta_color="inverse")
 with c4:
-    st.metric("Other",                   tot_other_cur,   fmt_delta(tot_other_cur,   tot_other_prv,   prior_label is not None))
+    st.metric("Other", tot_other_cur,
+              fmt_delta(tot_other_cur, tot_other_prv, prior_label is not None),
+              delta_color="inverse")
 
 # ───────────────── BUILD RESULTS ─────────────────
 rows = []

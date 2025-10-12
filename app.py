@@ -1,4 +1,4 @@
-# Greeno Big Three v1.7.2 — strict parser (TOTAL-aware bins, left-label) +
+# Greeno Big Three v1.7.3 — strict parser (TOTAL-aware bins, left-label) +
 # Quick Glance scoreboard (dynamic green/red border accents; lower = better) +
 # Reason totals (Missing + Attitude + Other) +
 # Period Change Summary (text, dynamic height) +
@@ -55,7 +55,7 @@ def style_table(df: pd.DataFrame, highlight_grand_total: bool = True) -> "pd.io.
     return sty
 
 # ───────────────── HEADER / THEME ─────────────────
-st.set_page_config(page_title="Greeno Big Three v1.7.2", layout="wide")
+st.set_page_config(page_title="Greeno Big Three v1.7.3", layout="wide")
 
 logo_path = "greenosu.webp"
 if os.path.exists(logo_path):
@@ -74,7 +74,7 @@ st.markdown(
 ">
   {logo_html}
   <div style="display:flex; flex-direction:column; justify-content:center;">
-      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.7.2</h1>
+      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.7.3</h1>
       <div style="height:5px; background-color:#F44336; width:300px; margin-top:10px; border-radius:3px;"></div>
   </div>
 </div>

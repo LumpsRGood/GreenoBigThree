@@ -1,7 +1,7 @@
-# Greeno Big Three v1.6.6 — strict parser (TOTAL-aware bins, left-label) +
-# collapsible ADs + reason totals (Missing + Attitude) + text-only Eric email +
+# Greeno Big Three v1.6.7 — strict parser (TOTAL-aware bins, left-label) +
+# collapsible ADs + reason totals (Missing + Attitude) + Period Change Summary (text) +
 # Categories: To-go Missing Complaints (To-Go/Delivery) + Attitude (all segments) + Other (placeholder)
-# + High-contrast table styling (spinner kept: "Roll Tide…")
+# + High-contrast table styling + Simplified exports (Excel All Sheets only)
 import io, os, re, base64, statistics
 from collections import defaultdict
 from typing import Dict, List, Tuple, Optional
@@ -41,27 +41,18 @@ def style_table(df: pd.DataFrame, highlight_grand_total: bool = True) -> "pd.io.
     if highlight_grand_total:
         def highlight_total(row):
             if str(row.name) == "— Grand Total —":
-                return [
-                    "background-color: #FFE39B; color: #111; font-weight: 700;"
-                ] * len(row)
+                return ["background-color: #FFE39B; color: #111; font-weight: 700;"] * len(row)
             return [""] * len(row)
-
         sty = sty.apply(highlight_total, axis=1)
 
-    # Make index text dark too
+    # Make index header text dark too
     sty = sty.set_table_styles(
-        [
-            {
-                "selector": "th.row_heading, th.blank",
-                "props": [("color", "#111"), ("border-color", "#CCD3DB")],
-            }
-        ]
+        [{"selector": "th.row_heading, th.blank", "props": [("color", "#111"), ("border-color", "#CCD3DB")]}]
     )
-
     return sty
 
 # ───────────────── HEADER / THEME ─────────────────
-st.set_page_config(page_title="Greeno Big Three v1.6.6", layout="wide")
+st.set_page_config(page_title="Greeno Big Three v1.6.7", layout="wide")
 
 logo_path = "greenosu.webp"
 if os.path.exists(logo_path):
@@ -80,11 +71,10 @@ st.markdown(
 ">
   {logo_html}
   <div style="display:flex; flex-direction:column; justify-content:center;">
-      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.6.6</h1>
+      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.6.7</h1>
       <div style="height:5px; background-color:#F44336; width:300px; margin-top:10px; border-radius:3px;"></div>
       <p style="margin:10px 0 0; opacity:.9; font-size:1.05rem;">
-        Strict parsing + TOTAL-aware bins · Collapsible AD sections · Reason totals (Missing + Attitude)
-        · Text-only Eric email · Category summaries · High-contrast tables
+        Strict parsing · Collapsible AD sections · Reason totals (Missing + Attitude) · Period change summary · High-contrast tables · Single Excel export
       </p>
   </div>
 </div>
@@ -96,9 +86,7 @@ st.markdown(
 with st.sidebar:
     st.header("1) Upload PDF")
     up = st.file_uploader("Choose the PDF report", type=["pdf"])
-    st.caption(
-        "Parses labels from the left side. Missing uses To-Go & Delivery; Attitude includes all segments."
-    )
+    st.caption("Parses labels from the left side. Missing = To-Go & Delivery; Attitude = all segments.")
 
 if not up:
     st.markdown(
@@ -158,7 +146,6 @@ ATTITUDE_REASONS = [
     "Manager did not follow up",
     "Argued with guest",
 ]
-
 ALL_CANONICAL = MISSING_REASONS + ATTITUDE_REASONS
 
 def _norm(s: str) -> str:
@@ -270,13 +257,7 @@ def build_header_bins(header_positions: Dict[str, float], total_x: Optional[floa
     items = sorted(header_positions.items(), key=lambda kv: _key(kv[0]))
     headers = [h for h, _ in items]
     xs = [x for _, x in items]
-
-    if len(xs) >= 2:
-        gaps = [xs[i+1] - xs[i] for i in range(len(xs)-1)]
-        med_gap = statistics.median(gaps)
-    else:
-        med_gap = 60.0
-
+    med_gap = statistics.median([xs[i+1]-xs[i] for i in range(len(xs)-1)]) if len(xs) >= 2 else 60.0
     bins = []
     for i, (h, x) in enumerate(zip(headers, xs)):
         left = (xs[i-1] + x)/2 if i > 0 else x - 0.5*med_gap
@@ -449,7 +430,7 @@ if df.empty:
     st.warning("No matching reasons found for the selected period.")
     st.stop()
 
-# Categories
+# ───────────────── CATEGORY MAPPING ─────────────────
 CATEGORY_TOGO_MISSING = "To-go Missing Complaints"
 CATEGORY_ATTITUDE     = "Attitude"
 CATEGORY_OTHER        = "Other"      # placeholder
@@ -458,13 +439,13 @@ CATEGORY_MAP = {r: CATEGORY_TOGO_MISSING for r in MISSING_REASONS}
 CATEGORY_MAP.update({r: CATEGORY_ATTITUDE for r in ATTITUDE_REASONS})
 df["Category"] = df["Reason"].map(CATEGORY_MAP).fillna("Unassigned")
 
+# ───────────────── DISPLAY (collapsible AD sections) ─────────────────
 st.success("✅ Parsed with strict labels & TOTAL-aware bins.")
 st.subheader(f"Results for period: {sel_col}")
 
-# AD summary (all rows)
 col1, col2 = st.columns([1, 3])
 with col1:
-    expand_all = st.toggle("Expand all Area Directors", value=False)
+    expand_all = st.toggle("Expand all Area Directors", value=False, help="Show all stores & reason pivots for each AD")
 
 with col2:
     ad_totals = (
@@ -472,8 +453,7 @@ with col2:
           .groupby("Area Director", as_index=False)["Value"].sum()
           .rename(columns={"Value":"AD Total"})
     )
-    st.dataframe(style_table(ad_totals, highlight_grand_total=False),
-                 use_container_width=True,
+    st.dataframe(style_table(ad_totals, highlight_grand_total=False), use_container_width=True,
                  height=min(400, 60 + 28 * max(2, len(ad_totals))))
 
 # per-store + per-AD totals (all rows)
@@ -484,7 +464,6 @@ store_totals = (
 df_detail = df.merge(store_totals, on=["Area Director","Store"], how="left") \
               .merge(ad_totals, on="Area Director", how="left")
 
-# Collapsible ADs
 ads = df_detail["Area Director"].dropna().unique().tolist()
 for ad in ads:
     sub = df_detail[df_detail["Area Director"]==ad].copy()
@@ -504,9 +483,9 @@ for ad in ads:
             pivot["Total"] = pivot.sum(axis=1)
             st.dataframe(style_table(pivot, highlight_grand_total=False), use_container_width=True)
 
-# Reason totals — Missing (To Go + Delivery)
+# ───────────────── REASON TOTALS — Missing ─────────────────
 st.header("4) Reason totals — To-go Missing Complaints (selected period)")
-st.caption("To-Go and Delivery only, for the seven Missing reasons (matches your spreadsheet flow).")
+st.caption("To-Go and Delivery only, for the seven Missing reasons.")
 
 missing_df = df[df["Reason"].isin(MISSING_REASONS) & df["Section"].isin({"To Go","Delivery"})]
 
@@ -534,7 +513,7 @@ reason_totals_missing.loc["— Grand Total —"] = reason_totals_missing.sum(num
 
 st.dataframe(style_table(reason_totals_missing), use_container_width=True)
 
-# Reason totals — Attitude (all segments)
+# ───────────────── REASON TOTALS — Attitude ─────────────────
 st.header("4b) Reason totals — Attitude (selected period)")
 st.caption("All segments (Dine-In, To Go, Delivery) for the seven Attitude reasons.")
 
@@ -569,7 +548,7 @@ reason_totals_attitude.loc["— Grand Total —"] = reason_totals_attitude.sum(n
 
 st.dataframe(style_table(reason_totals_attitude), use_container_width=True)
 
-# Category summaries
+# ───────────────── CATEGORY SUMMARIES ─────────────────
 def category_summary_block(number_label: str, category_name: str, allowed_sections: set):
     st.header(f"{number_label}) Category summary — {category_name}")
     subset = df[(df["Category"] == category_name) & (df["Section"].isin(allowed_sections))]
@@ -597,11 +576,14 @@ def category_summary_block(number_label: str, category_name: str, allowed_sectio
     st.dataframe(style_table(cat_store_totals, highlight_grand_total=False), use_container_width=True)
     return cat_ad_totals, cat_store_totals, cat_grand_total
 
+# 4c — To-go Missing Complaints (To-Go + Delivery only)
 tgc_ad_totals, tgc_store_totals, tgc_grand = category_summary_block("4c", "To-go Missing Complaints", {"To Go","Delivery"})
+# 4d — Attitude (all segments)
 att_ad_totals, att_store_totals, att_grand = category_summary_block("4d", "Attitude", {"To Go","Delivery","Dine-In"})
+# 4e — Other (placeholder)
 oth_ad_totals, oth_store_totals, oth_grand = category_summary_block("4e", "Other", {"To Go","Delivery","Dine-In"})
 
-# Drill-down / evidence
+# ───────────────── DRILL-DOWN / EVIDENCE ─────────────────
 with st.expander("🔎 Drill-down: show exact values per header for any AD & Store"):
     if raw_data:
         ad_pick = st.selectbox("Area Director", sorted(raw_data.keys()))
@@ -621,10 +603,8 @@ with st.expander("🔎 Drill-down: show exact values per header for any AD & Sto
     else:
         st.caption("No data parsed.")
 
-# ───────────────── PERIOD CHANGE SUMMARY (replaces email) ─────────────────
+# ───────────────── 5) PERIOD CHANGE SUMMARY (vs previous) ─────────────────
 st.header("5) Period change summary (vs previous period)")
-
-# Find prior period (if any)
 try:
     cur_idx = ordered_headers.index(sel_col)
     prior_label = ordered_headers[cur_idx - 1] if cur_idx > 0 else None
@@ -634,19 +614,7 @@ except ValueError:
 if not prior_label:
     st.info("No earlier period available to compare against.")
 else:
-    # Helper to compute totals for a given subset, list of reasons, and allowed sections
     def totals_by_reason_for(period_label: str, reasons: list[str], allowed_sections: set[str]) -> pd.Series:
-        rows = []
-        for ad, stores in raw_data.items():
-            for store, sections in stores.items():
-                for section, reason_map in sections.items():
-                    if section not in allowed_sections:
-                        continue
-                    per = reason_map.get("__all__", {})
-                    for r in reasons:
-                        rows.append(int(per.get(r, {}).get(period_label, 0)))
-        # rows is flattened per reason—build a Series reason->sum
-        # Better: compute per reason explicitly
         sums = {r: 0 for r in reasons}
         for ad, stores in raw_data.items():
             for store, sections in stores.items():
@@ -658,56 +626,51 @@ else:
                         sums[r] += int(per.get(r, {}).get(period_label, 0))
         return pd.Series(sums).astype(int)
 
-    # Category scopes
     missing_sections = {"To Go", "Delivery"}
     attitude_sections = {"To Go", "Delivery", "Dine-In"}
 
-    # Current vs prior totals per reason
     cur_missing = totals_by_reason_for(sel_col, MISSING_REASONS, missing_sections)
     prv_missing = totals_by_reason_for(prior_label, MISSING_REASONS, missing_sections)
     cur_att     = totals_by_reason_for(sel_col, ATTITUDE_REASONS, attitude_sections)
     prv_att     = totals_by_reason_for(prior_label, ATTITUDE_REASONS, attitude_sections)
 
-    # Deltas
     delta_missing = (cur_missing - prv_missing).astype(int)
     delta_att     = (cur_att - prv_att).astype(int)
 
-    # Overall category deltas
-    total_missing_cur = int(cur_missing.sum())
-    total_missing_prv = int(prv_missing.sum())
-    total_att_cur     = int(cur_att.sum())
-    total_att_prv     = int(prv_att.sum())
+    total_missing_cur = int(cur_missing.sum()); total_missing_prv = int(prv_missing.sum())
+    total_att_cur     = int(cur_att.sum());     total_att_prv     = int(prv_att.sum())
 
     def format_delta(n: int) -> str:
         if n > 0:  return f"▲ +{n}"
         if n < 0:  return f"▼ {n}"
         return "— 0"
 
-    # Build a friendly text summary
     lines = []
     lines.append(f"Selected period: {sel_col}   •   Prior: {prior_label}")
     lines.append("")
     lines.append("To-go Missing Complaints (To-Go + Delivery)")
     lines.append(f"- Overall: {total_missing_cur} ({format_delta(total_missing_cur - total_missing_prv)} vs prior)")
+    any_change_missing = False
     for r in MISSING_REASONS:
         d = int(delta_missing.get(r, 0))
         if d != 0:
             lines.append(f"  • {r}: {int(cur_missing[r])} ({format_delta(d)})")
-    if all(int(delta_missing.get(r, 0)) == 0 for r in MISSING_REASONS):
+            any_change_missing = True
+    if not any_change_missing:
         lines.append("  • No change by reason.")
-
     lines.append("")
     lines.append("Attitude (All segments)")
     lines.append(f"- Overall: {total_att_cur} ({format_delta(total_att_cur - total_att_prv)} vs prior)")
+    any_change_att = False
     for r in ATTITUDE_REASONS:
         d = int(delta_att.get(r, 0))
         if d != 0:
             lines.append(f"  • {r}: {int(cur_att[r])} ({format_delta(d)})")
-    if all(int(delta_att.get(r, 0)) == 0 for r in ATTITUDE_REASONS):
+            any_change_att = True
+    if not any_change_att:
         lines.append("  • No change by reason.")
 
     summary_text = "\n".join(lines)
-
     st.text_area("Copy to clipboard", summary_text, height=220)
     st.download_button(
         "📥 Download summary as .txt",
@@ -716,45 +679,19 @@ else:
         mime="text/plain",
     )
 
-
-# Exports
+# ───────────────── 6) EXPORT — Excel only (All Sheets) ─────────────────
 st.header("6) Export results")
-
-csv = df_detail.to_csv(index=False)
-st.download_button("📥 Download detail CSV", data=csv, file_name=f"ad_store_detail_{sel_col.replace(' ','_')}.csv", mime="text/csv")
-
-st.download_button(
-    "📥 Download Reason Totals — Missing (CSV)",
-    data=reason_totals_missing.to_csv().encode("utf-8"),
-    file_name=f"reason_totals_missing_{sel_col.replace(' ','_')}.csv",
-    mime="text/csv"
-)
-st.download_button(
-    "📥 Download Reason Totals — Attitude (CSV)",
-    data=reason_totals_attitude.to_csv().encode("utf-8"),
-    file_name=f"reason_totals_attitude_{sel_col.replace(' ','_')}.csv",
-    mime="text/csv"
-)
-
-def maybe_dl(df_in, label, fname):
-    if df_in is not None:
-        st.download_button(label, data=df_in.to_csv(index=False).encode("utf-8"), file_name=fname, mime="text/csv")
-
-maybe_dl(tgc_ad_totals,    "📥 Category AD Totals — To-go Missing (CSV)", f"category_togo_missing_ad_{sel_col.replace(' ','_')}.csv")
-maybe_dl(tgc_store_totals, "📥 Category Store Totals — To-go Missing (CSV)", f"category_togo_missing_store_{sel_col.replace(' ','_')}.csv")
-maybe_dl(att_ad_totals,    "📥 Category AD Totals — Attitude (CSV)", f"category_attitude_ad_{sel_col.replace(' ','_')}.csv")
-maybe_dl(att_store_totals, "📥 Category Store Totals — Attitude (CSV)", f"category_attitude_store_{sel_col.replace(' ','_')}.csv")
-maybe_dl(oth_ad_totals,    "📥 Category AD Totals — Other (CSV)", f"category_other_ad_{sel_col.replace(' ','_')}.csv")
-maybe_dl(oth_store_totals, "📥 Category Store Totals — Other (CSV)", f"category_other_store_{sel_col.replace(' ','_')}.csv")
 
 buff = io.BytesIO()
 with pd.ExcelWriter(buff, engine="openpyxl") as writer:
+    # Detail + rollups
     df_detail.to_excel(writer, index=False, sheet_name="Detail")
     ad_totals.to_excel(writer, index=False, sheet_name="AD Totals")
     store_totals.to_excel(writer, index=False, sheet_name="Store Totals")
+    # Reason totals
     reason_totals_missing.to_excel(writer, sheet_name="Reason Totals (Missing)")
     reason_totals_attitude.to_excel(writer, sheet_name="Reason Totals (Attitude)")
-
+    # Category sheets
     (tgc_ad_totals if tgc_ad_totals is not None else pd.DataFrame(columns=["Area Director","AD Category Total"])) \
         .to_excel(writer, index=False, sheet_name="Cat-ToGoMissing AD Totals")
     (tgc_store_totals if tgc_store_totals is not None else pd.DataFrame(columns=["Area Director","Store","Category Total"])) \
@@ -775,8 +712,10 @@ st.download_button(
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
 
+# ───────────────── DEBUG / VERIFICATION ─────────────────
 with st.expander("🧪 Debug: AD ↔ Store pairs detected this run"):
     if pairs_debug:
-        st.dataframe(pd.DataFrame(pairs_debug, columns=["Area Director","Store"]))
+        st.dataframe(style_table(pd.DataFrame(pairs_debug, columns=["Area Director","Store"]), highlight_grand_total=False),
+                     use_container_width=True)
     else:
         st.caption("No pairs captured (unexpected).")

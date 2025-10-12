@@ -1,7 +1,7 @@
-# Greeno Big Three v1.6.8 — strict parser (TOTAL-aware bins, left-label) +
+# Greeno Big Three v1.6.9 — strict parser (TOTAL-aware bins, left-label) +
 # collapsible ADs + reason totals (Missing + Attitude + Other) + Period Change Summary (text) +
+# Historical context (lower = better) + Single Excel export
 # Categories: To-go Missing Complaints (To-Go/Delivery) + Attitude (all segments) + Other (all segments)
-# + High-contrast table styling + Simplified exports (Excel All Sheets only)
 import io, os, re, base64, statistics
 from collections import defaultdict
 from typing import Dict, List, Tuple, Optional
@@ -52,7 +52,7 @@ def style_table(df: pd.DataFrame, highlight_grand_total: bool = True) -> "pd.io.
     return sty
 
 # ───────────────── HEADER / THEME ─────────────────
-st.set_page_config(page_title="Greeno Big Three v1.6.8", layout="wide")
+st.set_page_config(page_title="Greeno Big Three v1.6.9", layout="wide")
 
 logo_path = "greenosu.webp"
 if os.path.exists(logo_path):
@@ -71,10 +71,10 @@ st.markdown(
 ">
   {logo_html}
   <div style="display:flex; flex-direction:column; justify-content:center;">
-      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.6.8</h1>
+      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.6.9</h1>
       <div style="height:5px; background-color:#F44336; width:300px; margin-top:10px; border-radius:3px;"></div>
       <p style="margin:10px 0 0; opacity:.9; font-size:1.05rem;">
-        Strict parsing · Collapsible AD sections · Reason totals (Missing + Attitude + Other) · Period change summary · High-contrast tables · Single Excel export
+        Strict parsing · Collapsible ADs · Reason totals (Missing + Attitude + Other) · Period change summary · Historical highs/lows (lower = better) · Excel (All Sheets)
       </p>
   </div>
 </div>
@@ -183,7 +183,6 @@ ALIASES_ATTITUDE = {
     _norm("Manager Did Not Follow Up"):               "Manager did not follow up",
     _norm("Argued With Guest"):                       "Argued with guest",
 }
-# NEW: Other aliases
 ALIASES_OTHER = {
     _norm("Long Hold/No Answer/Hung Up"):                            "Long hold/no answer",
     _norm("No/Unsatisfactory Compensation Offered By Restaurant"):   "No/insufficient compensation offered",
@@ -744,8 +743,82 @@ else:
         mime="text/plain",
     )
 
-# ───────────────── 7) EXPORT — Excel only (All Sheets) ─────────────────
-st.header("7) Export results")
+# ───────────────── 7) Historical context — highs/lows vs all periods ─────────────────
+st.header("7) Historical context — highs/lows vs all periods")
+
+def build_reason_period_matrix(reasons: list[str], allowed_sections: set[str]) -> dict[str, dict[str, int]]:
+    """
+    Returns: {period -> {reason -> total}} across all ADs/stores for allowed sections.
+    """
+    mat = {p: {r: 0 for r in reasons} for p in ordered_headers}
+    for ad, stores in raw_data.items():
+        for store, sections_map in stores.items():
+            for sec, reason_map in sections_map.items():
+                if sec not in allowed_sections:
+                    continue
+                per = reason_map.get("__all__", {})
+                for r in reasons:
+                    pr = per.get(r, {})
+                    for p in ordered_headers:
+                        mat[p][r] += int(pr.get(p, 0))
+    return mat
+
+def build_highlow_tables(reasons: list[str], allowed_sections: set[str], title: str):
+    st.subheader(title)
+
+    mat = build_reason_period_matrix(reasons, allowed_sections)
+
+    rows = []
+    num_periods = len(ordered_headers)
+    for r in reasons:
+        series = [(p, mat[p][r]) for p in ordered_headers]
+        # LOWER = BETTER
+        best_period, best_val   = min(series, key=lambda kv: kv[1])  # lowest value
+        worst_period, worst_val = max(series, key=lambda kv: kv[1])  # highest value
+        # Rank 1 = lowest value
+        sorted_asc = sorted(series, key=lambda kv: kv[1])
+        rank = next(i+1 for i,(p,v) in enumerate(sorted_asc) if p == sel_col)
+        cur_val = mat[sel_col][r]
+        rows.append({
+            "Reason": r,
+            "Current": cur_val,
+            "Rank": f"{rank}/{num_periods}",
+            "Best (Period)": f"{best_val} @ {best_period}",
+            "Worst (Period)": f"{worst_val} @ {worst_period}",
+        })
+
+    df_reasons = pd.DataFrame(rows).set_index("Reason")
+
+    # Category totals across periods (lower = better)
+    totals_by_period = {p: sum(mat[p][r] for r in reasons) for p in ordered_headers}
+    best_p, best_total   = min(totals_by_period.items(), key=lambda kv: kv[1])
+    worst_p, worst_total = max(totals_by_period.items(), key=lambda kv: kv[1])
+    current_total = totals_by_period.get(sel_col, 0)
+    rank_list = sorted(totals_by_period.items(), key=lambda kv: kv[1])  # ascending
+    current_rank_idx = next(i+1 for i,(p,v) in enumerate(rank_list) if p == sel_col)
+
+    colA, colB, colC = st.columns(3)
+    with colA:
+        st.metric("Current total (lower is better)", current_total)
+    with colB:
+        st.metric("Best total (lowest)", f"{best_total}", help=f"Period: {best_p}")
+    with colC:
+        st.metric("Worst total (highest)", f"{worst_total}", help=f"Period: {worst_p}")
+    st.caption(f"Current period rank: {current_rank_idx}/{num_periods} (1 = lowest/best)")
+
+    st.dataframe(style_table(df_reasons, highlight_grand_total=False), use_container_width=True)
+
+# Missing → To-Go & Delivery only
+build_highlow_tables(MISSING_REASONS, {"To Go","Delivery"}, "7a) To-go Missing Complaints (To-Go + Delivery) — highs/lows")
+
+# Attitude → All segments
+build_highlow_tables(ATTITUDE_REASONS, {"Dine-In","To Go","Delivery"}, "7b) Attitude (All segments) — highs/lows")
+
+# Other → All segments
+build_highlow_tables(OTHER_REASONS, {"Dine-In","To Go","Delivery"}, "7c) Other (All segments) — highs/lows")
+
+# ───────────────── 8) EXPORT — Excel only (All Sheets) ─────────────────
+st.header("8) Export results")
 
 buff = io.BytesIO()
 with pd.ExcelWriter(buff, engine="openpyxl") as writer:

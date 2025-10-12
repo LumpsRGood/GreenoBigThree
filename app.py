@@ -429,7 +429,7 @@ if not ordered_headers:
 st.header("2) Pick the period")
 sel_col = st.selectbox("Period", options=ordered_headers, index=len(ordered_headers)-1)
 
-# ───────────────── QUICK GLANCE SCOREBOARD ─────────────────
+# ───────────────── QUICK GLANCE SCOREBOARD (vs previous period; lower=better) ─────────────────
 st.markdown("### Quick glance")
 
 def _total_for(period_label: str, reasons: list[str], sections: set[str]) -> int:
@@ -446,21 +446,7 @@ def _total_for(period_label: str, reasons: list[str], sections: set[str]) -> int
                     total += int(per.get(r, {}).get(period_label, 0))
     return int(total)
 
-def _totals_by_period(reasons: list[str], sections: set[str]) -> Dict[str, int]:
-    """Return {period -> total} for a category across all ADs/stores."""
-    res = {p: 0 for p in ordered_headers}
-    for ad, stores in raw_data.items():
-        for store, sects in stores.items():
-            for sec_name, reason_map in sects.items():
-                if sec_name not in sections:
-                    continue
-                per = reason_map.get("__all__", {})
-                for r in reasons:
-                    for p in ordered_headers:
-                        res[p] += int(per.get(r, {}).get(p, 0))
-    return res
-
-# Prior period (if any)
+# Period context (previous = immediately left of selected)
 try:
     cur_idx = ordered_headers.index(sel_col)
     prior_label = ordered_headers[cur_idx - 1] if cur_idx > 0 else None
@@ -472,97 +458,94 @@ missing_sections = {"To Go", "Delivery"}
 att_sections     = {"To Go", "Delivery", "Dine-In"}
 other_sections   = {"To Go", "Delivery", "Dine-In"}
 
-# Totals (current and prior)
-tot_missing_cur = _total_for(sel_col,      MISSING_REASONS,  missing_sections)
-tot_missing_prv = _total_for(prior_label,  MISSING_REASONS,  missing_sections)
-tot_att_cur     = _total_for(sel_col,      ATTITUDE_REASONS, att_sections)
-tot_att_prv     = _total_for(prior_label,  ATTITUDE_REASONS, att_sections)
-tot_other_cur   = _total_for(sel_col,      OTHER_REASONS,    other_sections)
-tot_other_prv   = _total_for(prior_label,  OTHER_REASONS,    other_sections)
+# Current/prior totals
+tot_missing_cur = _total_for(sel_col,     MISSING_REASONS,  missing_sections)
+tot_att_cur     = _total_for(sel_col,     ATTITUDE_REASONS, att_sections)
+tot_other_cur   = _total_for(sel_col,     OTHER_REASONS,    other_sections)
+tot_missing_prv = _total_for(prior_label, MISSING_REASONS,  missing_sections)
+tot_att_prv     = _total_for(prior_label, ATTITUDE_REASONS, att_sections)
+tot_other_prv   = _total_for(prior_label, OTHER_REASONS,    other_sections)
 
 overall_cur = tot_missing_cur + tot_att_cur + tot_other_cur
 overall_prv = (tot_missing_prv + tot_att_prv + tot_other_prv) if prior_label else 0
 
-def fmt_delta(a: int, b: int, has_prior: bool) -> str:
-    if not has_prior:
-        return "n/a"
-    diff = a - b
-    return f"{diff:+d}"
+# Deltas (numbers) and formatting
+def diff_val(cur, prv, has_prior): 
+    return (cur - prv) if has_prior else None
+def fmt_diff(d): 
+    return "n/a" if d is None else f"{d:+d}"
 
-# Determine best/worst across ALL periods for each category + overall (lower = better)
-missing_series = _totals_by_period(MISSING_REASONS,  missing_sections)
-att_series     = _totals_by_period(ATTITUDE_REASONS, att_sections)
-other_series   = _totals_by_period(OTHER_REASONS,    other_sections)
-overall_series = {p: missing_series[p] + att_series[p] + other_series[p] for p in ordered_headers}
+overall_diff = diff_val(overall_cur, overall_prv, prior_label is not None)
+miss_diff    = diff_val(tot_missing_cur, tot_missing_prv, prior_label is not None)
+att_diff     = diff_val(tot_att_cur,     tot_att_prv,     prior_label is not None)
+oth_diff     = diff_val(tot_other_cur,   tot_other_prv,   prior_label is not None)
 
-def best_worst(series: Dict[str, int]) -> Tuple[Tuple[str,int], Tuple[str,int]]:
-    best = min(series.items(), key=lambda kv: kv[1])
-    worst = max(series.items(), key=lambda kv: kv[1])
-    return best, worst
+# Tile color class from delta (vs previous): green if improved (↓), red if worse (↑)
+def cls_from_delta(d):
+    if d is None: return ""
+    return " best" if d < 0 else (" worst" if d > 0 else "")
 
-(best_overall, worst_overall) = best_worst(overall_series)
-(best_missing, worst_missing) = best_worst(missing_series)
-(best_att,     worst_att)     = best_worst(att_series)
-(best_other,   worst_other)   = best_worst(other_series)
+overall_cls = cls_from_delta(overall_diff)
+missing_cls = cls_from_delta(miss_diff)
+att_cls     = cls_from_delta(att_diff)
+other_cls   = cls_from_delta(oth_diff)
 
-# Assign dynamic classes: 'best' if current equals global best, 'worst' if equals global worst
-def tile_class(current_val: int, best_tuple: Tuple[str,int], worst_tuple: Tuple[str,int]) -> str:
-    if current_val == best_tuple[1]:
-        return " best"
-    if current_val == worst_tuple[1]:
-        return " worst"
-    return ""
-
+# Clearer borders + colored deltas + explicit “vs {prior}”
 score_css = """
 <style>
-.score-wrap{display:flex;gap:16px;margin:10px 0 20px 0}
-.score{flex:1;background:#1113;border:2px solid #2a2f36;border-radius:12px;padding:14px 18px;text-align:center}
-.score.best{border-color:#4CAF50}
-.score.worst{border-color:#E53935}
-.score h4{margin:0 0 6px 0;font-weight:600;font-size:0.95rem;color:#cfd8e3}
-.score .num{font-size:2.8rem;line-height:1.1;font-weight:700;color:#fff;margin:0}
-.score .delta{margin-top:4px;font-size:1rem;color:#9fb3c8}
+.score-wrap{display:flex;gap:16px;margin:10px 0 8px 0}
+.score{flex:1;background:#1113;border:2px solid #38414a;border-radius:14px;padding:18px 20px;text-align:center}
+.score.best{border-color:#66BB6A; box-shadow:0 0 0 1px rgba(102,187,106,.55) inset}
+.score.worst{border-color:#EF5350; box-shadow:0 0 0 1px rgba(239,83,80,.55) inset}
+.score h4{margin:0 0 8px 0;font-weight:700;font-size:1.15rem;color:#cfd8e3}
+.score .num{font-size:3rem;line-height:1.1;font-weight:800;color:#fff;margin:2px 0 2px}
+.score .delta{margin-top:6px;font-size:1.05rem}
+.delta.neg{color:#66BB6A}   /* lower = better (green) */
+.delta.pos{color:#EF5350}   /* higher = worse (red)   */
+.delta.zero{color:#9fb3c8}
+.delta .vs{opacity:.85;margin-left:8px}
 @media (max-width:900px){.score-wrap{flex-direction:column}}
 </style>
 """
 st.markdown(score_css, unsafe_allow_html=True)
 
-overall_delta = fmt_delta(overall_cur, overall_prv, prior_label is not None)
-miss_delta = fmt_delta(tot_missing_cur, tot_missing_prv, prior_label is not None)
-att_delta  = fmt_delta(tot_att_cur,     tot_att_prv,     prior_label is not None)
-oth_delta  = fmt_delta(tot_other_cur,   tot_other_prv,   prior_label is not None)
+def diff_class(d):
+    if d is None: return ""
+    return "neg" if d < 0 else ("pos" if d > 0 else "zero")
 
-overall_cls = tile_class(overall_cur, best_overall, worst_overall)
-missing_cls = tile_class(tot_missing_cur, best_missing, worst_missing)
-att_cls     = tile_class(tot_att_cur,     best_att,     worst_att)
-other_cls   = tile_class(tot_other_cur,   best_other,   worst_other)
+prior_text = prior_label or "n/a"
 
 score_html = f"""
 <div class="score-wrap">
   <div class="score{overall_cls}">
     <h4>Overall (all categories)</h4>
     <div class="num">{overall_cur}</div>
-    <div class="delta">{overall_delta}</div>
+    <div class="delta {diff_class(overall_diff)}">{fmt_diff(overall_diff)}<span class="vs">vs {prior_text}</span></div>
   </div>
   <div class="score{missing_cls}">
     <h4>To-go Missing Complaints</h4>
     <div class="num">{tot_missing_cur}</div>
-    <div class="delta">{miss_delta}</div>
+    <div class="delta {diff_class(miss_diff)}">{fmt_diff(miss_diff)}<span class="vs">vs {prior_text}</span></div>
   </div>
   <div class="score{att_cls}">
     <h4>Attitude</h4>
     <div class="num">{tot_att_cur}</div>
-    <div class="delta">{att_delta}</div>
+    <div class="delta {diff_class(att_diff)}">{fmt_diff(att_diff)}<span class="vs">vs {prior_text}</span></div>
   </div>
   <div class="score{other_cls}">
     <h4>Other</h4>
     <div class="num">{tot_other_cur}</div>
-    <div class="delta">{oth_delta}</div>
+    <div class="delta {diff_class(oth_diff)}">{fmt_diff(oth_diff)}<span class="vs">vs {prior_text}</span></div>
   </div>
 </div>
 """
 st.markdown(score_html, unsafe_allow_html=True)
 
+# Helper caption
+if prior_label:
+    st.caption(f"Δ shows change vs previous period ({prior_label}). Lower is better.")
+else:
+    st.caption("No previous period available — deltas shown as n/a. Lower is better.")
 # ───────────────── BUILD RESULTS ─────────────────
 rows = []
 for ad, stores in raw_data.items():

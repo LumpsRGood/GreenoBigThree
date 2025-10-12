@@ -796,9 +796,7 @@ else:
 st.header("7) Historical context — highs/lows vs all periods (lower = better)")
 
 def build_reason_period_matrix(reasons: list[str], allowed_sections: set[str]) -> dict[str, dict[str, int]]:
-    """
-    Returns: {period -> {reason -> total}} across all ADs/stores for allowed sections.
-    """
+    """Returns: {period -> {reason -> total}} across all ADs/stores for allowed sections."""
     mat = {p: {r: 0 for r in reasons} for p in ordered_headers}
     for ad, stores in raw_data.items():
         for store, sections_map in stores.items():
@@ -823,14 +821,12 @@ def build_highlow_tables(reasons: list[str], allowed_sections: set[str], title: 
     worst_vals = {}
     for r in reasons:
         series = [(p, mat[p][r]) for p in ordered_headers]
-        # LOWER = BETTER
-        best_period, best_val   = min(series, key=lambda kv: kv[1])  # lowest value
-        worst_period, worst_val = max(series, key=lambda kv: kv[1])  # highest value
+        best_period, best_val = min(series, key=lambda kv: kv[1])  # lowest value = best
+        worst_period, worst_val = max(series, key=lambda kv: kv[1])  # highest value = worst
         best_vals[r] = best_val
         worst_vals[r] = worst_val
-        # Rank 1 = lowest value
         sorted_asc = sorted(series, key=lambda kv: kv[1])
-        rank = next(i+1 for i,(p,v) in enumerate(sorted_asc) if p == sel_col)
+        rank = next(i + 1 for i, (p, v) in enumerate(sorted_asc) if p == sel_col)
         cur_val = mat[sel_col][r]
         rows.append({
             "Reason": r,
@@ -856,21 +852,22 @@ def build_highlow_tables(reasons: list[str], allowed_sections: set[str], title: 
 
     # Category totals across periods (lower = better)
     totals_by_period = {p: sum(mat[p][r] for r in reasons) for p in ordered_headers}
-    best_p, best_total   = min(totals_by_period.items(), key=lambda kv: kv[1])
+    best_p, best_total = min(totals_by_period.items(), key=lambda kv: kv[1])
     worst_p, worst_total = max(totals_by_period.items(), key=lambda kv: kv[1])
     current_total = totals_by_period.get(sel_col, 0)
-    rank_list = sorted(totals_by_period.items(), key=lambda kv: kv[1])  # ascending
-    current_rank_idx = next(i+1 for i,(p,v) in enumerate(rank_list) if p == sel_col)
+    rank_list = sorted(totals_by_period.items(), key=lambda kv: kv[1])
+    current_rank_idx = next(i + 1 for i, (p, v) in enumerate(rank_list) if p == sel_col)
 
+    # Fixed indentation and replaced metrics with visible periods inline
     colA, colB, colC = st.columns(3)
-with colA:
-    st.markdown(f"**Current total (lower is better):** {current_total}  ·  _{sel_col}_")
-with colB:
-    st.markdown(f"**Best total (lowest):** {best_total}  ·  _{best_p}_")
-with colC:
-    st.markdown(f"**Worst total (highest):** {worst_total}  ·  _{worst_p}_")
+    with colA:
+        st.markdown(f"**Current total (lower is better):** {current_total}  ·  _{sel_col}_")
+    with colB:
+        st.markdown(f"**Best total (lowest):** {best_total}  ·  _{best_p}_")
+    with colC:
+        st.markdown(f"**Worst total (highest):** {worst_total}  ·  _{worst_p}_")
 
-st.caption(f"Current period rank: {current_rank_idx}/{num_periods} (1 = lowest/best)")
+    st.caption(f"Current period rank: {current_rank_idx}/{num_periods} (1 = lowest/best)")
 
     sty = style_table(df_reasons, highlight_grand_total=False).apply(highlight_current, subset=["Current"])
     st.dataframe(sty, use_container_width=True)

@@ -863,13 +863,14 @@ def build_highlow_tables(reasons: list[str], allowed_sections: set[str], title: 
     current_rank_idx = next(i+1 for i,(p,v) in enumerate(rank_list) if p == sel_col)
 
     colA, colB, colC = st.columns(3)
-    with colA:
-        st.metric("Current total (lower is better)", current_total)
-    with colB:
-        st.metric("Best total (lowest)", f"{best_total}", help=f"Period: {best_p}")
-    with colC:
-        st.metric("Worst total (highest)", f"{worst_total}", help=f"Period: {worst_p}")
-    st.caption(f"Current period rank: {current_rank_idx}/{num_periods} (1 = lowest/best)")
+with colA:
+    st.markdown(f"**Current total (lower is better):** {current_total}  ·  _{sel_col}_")
+with colB:
+    st.markdown(f"**Best total (lowest):** {best_total}  ·  _{best_p}_")
+with colC:
+    st.markdown(f"**Worst total (highest):** {worst_total}  ·  _{worst_p}_")
+
+st.caption(f"Current period rank: {current_rank_idx}/{num_periods} (1 = lowest/best)")
 
     sty = style_table(df_reasons, highlight_grand_total=False).apply(highlight_current, subset=["Current"])
     st.dataframe(sty, use_container_width=True)

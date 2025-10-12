@@ -621,94 +621,101 @@ with st.expander("🔎 Drill-down: show exact values per header for any AD & Sto
     else:
         st.caption("No data parsed.")
 
-# Email generator (text-only Eric voice)
-st.header("5) Generate Eric-style email (text only)")
-st.caption("Outputs a plain-text email summary using Eric’s tone and structure.")
+# ───────────────── PERIOD CHANGE SUMMARY (replaces email) ─────────────────
+st.header("5) Period change summary (vs previous period)")
 
-def compute_delta_vs_prior(sel: str) -> Optional[Tuple[str, int]]:
-    try:
-        idx = ordered_headers.index(sel)
-    except ValueError:
-        return None
-    if idx == 0:
-        return None
-    prior = ordered_headers[idx - 1]
-    cur_total = int(missing_df["Value"].sum())  # Missing scope (To Go + Delivery)
-    rows_prior = []
-    for ad, stores in raw_data.items():
-        for store, sections in stores.items():
-            for section, reason_map in sections.items():
-                if section not in {"To Go", "Delivery"}:
-                    continue
-                all_per_header = reason_map.get("__all__", {})
-                for canon in MISSING_REASONS:
-                    rows_prior.append(int(all_per_header.get(canon, {}).get(prior, 0)))
-    prior_total = int(sum(rows_prior)) if rows_prior else 0
-    return prior, cur_total - prior_total
+# Find prior period (if any)
+try:
+    cur_idx = ordered_headers.index(sel_col)
+    prior_label = ordered_headers[cur_idx - 1] if cur_idx > 0 else None
+except ValueError:
+    prior_label = None
 
-top3 = (
-    reason_totals_missing.drop(index="— Grand Total —", errors="ignore")
-    .sort_values("Total", ascending=False)
-    .head(3)
-    .index.tolist()
-)
+if not prior_label:
+    st.info("No earlier period available to compare against.")
+else:
+    # Helper to compute totals for a given subset, list of reasons, and allowed sections
+    def totals_by_reason_for(period_label: str, reasons: list[str], allowed_sections: set[str]) -> pd.Series:
+        rows = []
+        for ad, stores in raw_data.items():
+            for store, sections in stores.items():
+                for section, reason_map in sections.items():
+                    if section not in allowed_sections:
+                        continue
+                    per = reason_map.get("__all__", {})
+                    for r in reasons:
+                        rows.append(int(per.get(r, {}).get(period_label, 0)))
+        # rows is flattened per reason—build a Series reason->sum
+        # Better: compute per reason explicitly
+        sums = {r: 0 for r in reasons}
+        for ad, stores in raw_data.items():
+            for store, sections in stores.items():
+                for section, reason_map in sections.items():
+                    if section not in allowed_sections:
+                        continue
+                    per = reason_map.get("__all__", {})
+                    for r in reasons:
+                        sums[r] += int(per.get(r, {}).get(period_label, 0))
+        return pd.Series(sums).astype(int)
 
-delta_info = compute_delta_vs_prior(sel_col)
-delta_line = ""
-if delta_info:
-    prior_label, delta_val = delta_info
-    arrow = "down" if delta_val < 0 else "up" if delta_val > 0 else "flat"
-    delta_line = f"P vs {prior_label}: {delta_val:+d} ({arrow})."
+    # Category scopes
+    missing_sections = {"To Go", "Delivery"}
+    attitude_sections = {"To Go", "Delivery", "Dine-In"}
 
-subject = st.text_input("Subject", value=f"{sel_col} NGC Reports")
+    # Current vs prior totals per reason
+    cur_missing = totals_by_reason_for(sel_col, MISSING_REASONS, missing_sections)
+    prv_missing = totals_by_reason_for(prior_label, MISSING_REASONS, missing_sections)
+    cur_att     = totals_by_reason_for(sel_col, ATTITUDE_REASONS, attitude_sections)
+    prv_att     = totals_by_reason_for(prior_label, ATTITUDE_REASONS, attitude_sections)
 
-greeting = "Area Directors,"
-intro = (
-    "Once again, here is the most important email I send each month. "
-    "This is where we focus on what matters most to our guests and our teams."
-)
-context = (
-    "Green indicates improvement period-over-period. Red indicates decline. "
-    "The goal is to remove avoidable friction for the guest—consistently."
-)
-highlights = [
-    f"Selected period: {sel_col}. {delta_line}".strip(),
-    f"Top drivers (Bad 3 focus this period): {', '.join(top3)}.",
-    "To-Go and Delivery are the only channels included in this Missing category view. Attitude includes all segments."
-]
-coaching = (
-    "Remember—telling your team not to get complaints is not the solution. "
-    "Coach the process: order accuracy, check staging, condiment readiness, and beverage handoff. "
-    "Close the loop with simple verifications at the window and the expo line."
-)
-signoff = "Thank you for leading from the front,\n\nEric"
+    # Deltas
+    delta_missing = (cur_missing - prv_missing).astype(int)
+    delta_att     = (cur_att - prv_att).astype(int)
 
-plain_text = f"""{greeting}
+    # Overall category deltas
+    total_missing_cur = int(cur_missing.sum())
+    total_missing_prv = int(prv_missing.sum())
+    total_att_cur     = int(cur_att.sum())
+    total_att_prv     = int(prv_att.sum())
 
-{intro}
+    def format_delta(n: int) -> str:
+        if n > 0:  return f"▲ +{n}"
+        if n < 0:  return f"▼ {n}"
+        return "— 0"
 
-Context
-- {context}
+    # Build a friendly text summary
+    lines = []
+    lines.append(f"Selected period: {sel_col}   •   Prior: {prior_label}")
+    lines.append("")
+    lines.append("To-go Missing Complaints (To-Go + Delivery)")
+    lines.append(f"- Overall: {total_missing_cur} ({format_delta(total_missing_cur - total_missing_prv)} vs prior)")
+    for r in MISSING_REASONS:
+        d = int(delta_missing.get(r, 0))
+        if d != 0:
+            lines.append(f"  • {r}: {int(cur_missing[r])} ({format_delta(d)})")
+    if all(int(delta_missing.get(r, 0)) == 0 for r in MISSING_REASONS):
+        lines.append("  • No change by reason.")
 
-Highlights
-- {highlights[0]}
-- {highlights[1]}
-- {highlights[2]}
+    lines.append("")
+    lines.append("Attitude (All segments)")
+    lines.append(f"- Overall: {total_att_cur} ({format_delta(total_att_cur - total_att_prv)} vs prior)")
+    for r in ATTITUDE_REASONS:
+        d = int(delta_att.get(r, 0))
+        if d != 0:
+            lines.append(f"  • {r}: {int(cur_att[r])} ({format_delta(d)})")
+    if all(int(delta_att.get(r, 0)) == 0 for r in ATTITUDE_REASONS):
+        lines.append("  • No change by reason.")
 
-{coaching}
+    summary_text = "\n".join(lines)
 
-{signoff}
-"""
+    st.text_area("Copy to clipboard", summary_text, height=220)
+    st.download_button(
+        "📥 Download summary as .txt",
+        data=summary_text.encode("utf-8"),
+        file_name=f"period_change_summary_{sel_col.replace(' ','_')}.txt",
+        mime="text/plain",
+    )
 
-st.subheader("Preview")
-st.code(plain_text, language="markdown")
-
-st.download_button(
-    "📥 Download email as .txt",
-    data=plain_text.encode("utf-8"),
-    file_name=f"{subject.replace(' ','_')}.txt",
-    mime="text/plain"
-)
 
 # Exports
 st.header("6) Export results")

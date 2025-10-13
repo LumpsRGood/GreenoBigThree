@@ -1,4 +1,4 @@
-# Greeno Big Three v1.7.7 — streamlined UI + wrapped labels + page-break carryover + DEBUG MODE
+# Greeno Big Three v1.7.8 — DEBUG + robust wrap/carryover for "No/Unsatisfactory Compensation Offered By (Restaurant)"
 # - Quick Glance (vs previous period; lower = better)
 # - Reason Totals (Missing/Attitude/Other) + Category Grand Totals
 # - Period Change Summary (text)
@@ -6,8 +6,8 @@
 # - Single Excel export (All Sheets)
 # - Special rule: "Out of menu item" counts Dine-In + To Go + Delivery everywhere
 # - Parser fixes:
-#     * detect & merge two-line wrapped reason labels (same page)
-#     * carry partial labels across a page break and merge on next page
+#     * detect & merge two/three-line wrapped reason labels (same page)
+#     * carry partial labels across a page break and merge on next page (2- or 3-line)
 # - DEBUG MODE adds:
 #     * unmatched labels panel
 #     * wrap/carryover counters
@@ -57,7 +57,7 @@ def style_table(df: pd.DataFrame, highlight_grand_total: bool = True) -> "pd.io.
     return sty
 
 # ───────────────── HEADER / THEME ─────────────────
-st.set_page_config(page_title="Greeno Big Three v1.7.7", layout="wide")
+st.set_page_config(page_title="Greeno Big Three v1.7.8", layout="wide")
 
 logo_path = "greenosu.webp"
 if os.path.exists(logo_path):
@@ -76,7 +76,7 @@ st.markdown(
 ">
   {logo_html}
   <div style="display:flex; flex-direction:column; justify-content:center;">
-      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.7.7</h1>
+      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.7.8</h1>
       <div style="height:5px; background-color:#F44336; width:300px; margin-top:10px; border-radius:3px;"></div>
   </div>
 </div>
@@ -190,6 +190,9 @@ ALIASES_OTHER = {
     _norm("Didn't Open/close On Time"):                              "Did not open on time",
     _norm("No/Poor Apology"):                                        "No/poor apology",
 }
+# Short-form alias for 2-line version without "Restaurant"
+ALIASES_OTHER[_norm("No/Unsatisfactory Compensation Offered By")] = "No/insufficient compensation offered"
+
 REASON_ALIASES_NORM = {**ALIASES_MISSING, **ALIASES_ATTITUDE, **ALIASES_OTHER}
 
 def normalize_reason(raw: str) -> Optional[str]:
@@ -347,7 +350,7 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes, debug: bool = False):
         "carry_merges": 0,
         "ignored_tokens": [],
         "token_trace": [],
-        "events": [],  # short messages you can surface after parse
+        "events": [],  # short messages surfaced after parse
     }
 
     carryover_partial = None  # holds a partial label that broke at a page end
@@ -382,7 +385,6 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes, debug: bool = False):
             current_store: Optional[str] = None
             current_section: Optional[str] = None
 
-            # helper for label text (left of first column)
             def left_label_text(line):
                 return " ".join(
                     w["text"].strip()
@@ -390,30 +392,58 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes, debug: bool = False):
                     if w["x1"] <= label_right_edge and w["text"].strip()
                 ).strip()
 
-            # If we have a carryover from last page, try to merge with first usable line(s)
+            # ─── Handle carryover from previous page with 2- or 3-part merge
             if carryover_partial:
-                look_ahead_limit = min(3, len(lines))
+                look_ahead_limit = min(4, len(lines))  # peek deeper for 3-line joins
+                merged = False
+
+                def _is_structural(t: str) -> bool:
+                    return (
+                        STORE_LINE_RX.match(t) or t in HEADINGS or
+                        SECTION_TOGO.match(t) or SECTION_DELIV.match(t) or SECTION_DINEIN.match(t)
+                    )
+
                 for k in range(look_ahead_limit):
                     L0 = lines[k]
-                    nxt_txt = L0["text"].strip()
-                    if (STORE_LINE_RX.match(nxt_txt)
-                        or nxt_txt in HEADINGS
-                        or SECTION_TOGO.match(nxt_txt)
-                        or SECTION_DELIV.match(nxt_txt)
-                        or SECTION_DINEIN.match(nxt_txt)):
+                    nxt_txt0 = L0["text"].strip()
+                    if _is_structural(nxt_txt0):
                         continue
                     label_text_2 = left_label_text(L0)
                     if not label_text_2:
                         continue
-                    combined_label = (carryover_partial["label_text_1"] + " " + label_text_2).strip()
-                    canon2 = normalize_reason(combined_label)
-                    if canon2:
+
+                    combined_label_2 = (carryover_partial["label_text_1"] + " " + label_text_2).strip()
+                    canon2 = normalize_reason(combined_label_2)
+
+                    canon3 = None
+                    combined_label_3 = None
+                    k2 = None
+                    if not canon2 and (k + 1) < len(lines):
+                        L1b = lines[k + 1]
+                        nxt_txt1b = L1b["text"].strip()
+                        if not _is_structural(nxt_txt1b):
+                            label_text_3 = left_label_text(L1b)
+                            if label_text_3:
+                                combined_label_3 = (combined_label_2 + " " + label_text_3).strip()
+                                canon3 = normalize_reason(combined_label_3)
+                                if not canon3:
+                                    # fallback for short-form without "Restaurant"
+                                    canon3 = normalize_reason(combined_label_2)
+
+                                if canon3:
+                                    k2 = k + 1
+
+                    if canon3 or canon2:
+                        final_canon = canon3 or canon2
                         sect = data[carryover_partial["ad"]].setdefault(
                             carryover_partial["store"], {}
                         ).setdefault(carryover_partial["section"], {})
                         per_header = sect.setdefault("__all__", defaultdict(lambda: defaultdict(int)))
 
                         combined_words = list(carryover_partial["words"]) + list(L0["words"])
+                        if canon3 and k2 is not None:
+                            combined_words += list(lines[k2]["words"])
+
                         for w in combined_words:
                             token = w["text"].strip()
                             if not re.fullmatch(r"-?\d+", token):
@@ -428,31 +458,37 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes, debug: bool = False):
                                         "page": page.page_number,
                                         "token": token,
                                         "xmid": xmid,
-                                        "reason": canon2,
+                                        "reason": final_canon,
                                         "store": carryover_partial["store"],
                                         "section": carryover_partial["section"],
                                     })
                                 continue
-                            per_header[canon2][mapped] += int(token)
+                            per_header[final_canon][mapped] += int(token)
                             if debug:
                                 debug_log["token_trace"].append({
                                     "page": page.page_number,
                                     "ad": carryover_partial["ad"],
                                     "store": carryover_partial["store"],
                                     "section": carryover_partial["section"],
-                                    "reason": canon2,
+                                    "reason": final_canon,
                                     "period": mapped,
                                     "value": int(token),
                                 })
 
-                        lines.pop(k)  # consume continuation line
+                        if canon3 and k2 is not None:
+                            lines.pop(k2)
+                        lines.pop(k)
                         if debug:
                             debug_log["carry_merges"] += 1
-                            debug_log["events"].append(f"Page {page.page_number}: carried label merged as '{canon2}'")
+                            debug_log["events"].append(
+                                f"Page {page.page_number}: carryover merged as '{final_canon}'"
+                            )
+                        merged = True
                         break
+
                 carryover_partial = None  # clear once attempted
 
-            # ────── MAIN PARSING LOOP (wrapped label aware) ──────
+            # ────── MAIN PARSING LOOP (wrapped label aware; supports 2/3 lines) ──────
             idx = 0
             while idx < len(lines):
                 L = lines[idx]
@@ -490,29 +526,57 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes, debug: bool = False):
                 label_text_1 = left_label_text(L)
                 canon = normalize_reason(label_text_1)
 
-                # Step 2: if no match, check for a wrapped label (current + next line)
-                use_two_lines = False
+                # Step 2: if no match, check for wrapped label over next 1–2 lines
+                consumed_lines = 1
                 combined_words = list(L["words"])
+
+                def _is_structural(t: str) -> bool:
+                    return (
+                        STORE_LINE_RX.match(t) or t in HEADINGS or
+                        SECTION_TOGO.match(t) or SECTION_DELIV.match(t) or SECTION_DINEIN.match(t)
+                    )
+
                 if not canon and (idx + 1) < len(lines):
                     L2 = lines[idx + 1]
                     nxt_txt = L2["text"].strip()
-                    if (not STORE_LINE_RX.match(nxt_txt)
-                        and nxt_txt not in HEADINGS
-                        and not SECTION_TOGO.match(nxt_txt)
-                        and not SECTION_DELIV.match(nxt_txt)
-                        and not SECTION_DINEIN.match(nxt_txt)):
+                    if not _is_structural(nxt_txt):
                         label_text_2 = left_label_text(L2)
                         if label_text_2:
-                            combined_label = (label_text_1 + " " + label_text_2).strip()
-                            canon2 = normalize_reason(combined_label)
-                            if canon2:
+                            combined_label_2 = (label_text_1 + " " + label_text_2).strip()
+                            canon2 = normalize_reason(combined_label_2)
+
+                            # Try 3-line join if still not matched
+                            canon3 = None
+                            combined_label_3 = None
+                            if not canon2 and (idx + 2) < len(lines):
+                                L3 = lines[idx + 2]
+                                nxt_txt3 = L3["text"].strip()
+                                if not _is_structural(nxt_txt3):
+                                    label_text_3 = left_label_text(L3)
+                                    if label_text_3:
+                                        combined_label_3 = (combined_label_2 + " " + label_text_3).strip()
+                                        canon3 = normalize_reason(combined_label_3)
+                                        if not canon3:
+                                            # allow short-form without trailing "Restaurant"
+                                            canon3 = normalize_reason(combined_label_2)
+
+                            if canon3:
+                                canon = canon3
+                                consumed_lines = 3
+                                combined_words = list(L["words"]) + list(L2["words"]) + list(L3["words"])
+                                if debug:
+                                    debug_log["wrap_merges"] += 1
+                                    debug_log["events"].append(
+                                        f"Page {page.page_number}: 3-line wrapped label merged as '{canon}'"
+                                    )
+                            elif canon2:
                                 canon = canon2
-                                use_two_lines = True
+                                consumed_lines = 2
                                 combined_words = list(L["words"]) + list(L2["words"])
                                 if debug:
                                     debug_log["wrap_merges"] += 1
                                     debug_log["events"].append(
-                                        f"Page {page.page_number}: wrapped label merged as '{canon}'"
+                                        f"Page {page.page_number}: 2-line wrapped label merged as '{canon}'"
                                     )
 
                 # No match: if this is the last line on the page, carry it to next page
@@ -575,8 +639,8 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes, debug: bool = False):
                             "value": int(token),
                         })
 
-                # If we consumed two lines for a wrapped label, skip the next line
-                idx += 2 if use_two_lines else 1
+                # Skip however many lines we consumed building the wrapped label (1/2/3)
+                idx += consumed_lines
 
     return {h: header_positions[h] for h in ordered_headers}, data, ordered_headers, pairs_debug, debug_log
 

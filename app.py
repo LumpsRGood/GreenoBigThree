@@ -1,7 +1,8 @@
-# Greeno Big Three v1.8.3 — trigger-based label matching (no PyMuPDF)
-# - Uses short, unique triggers for each metric (robust to wraps/variations)
-# - Keeps pdfplumber-based header binning + TOTAL hard cutoff
-# - Preserves compensation 3-line wrap handling (prev/next line capture)
+# Greeno Big Three v1.8.4 — trigger-based matching + adjacent-line fallback
+# - pdfplumber parser (no fitz)
+# - Short, unique triggers for metrics (robust to wraps/variation)
+# - Compensation special-case (captures prev/next lines)
+# - NEW: generic adjacent-line fallback for all reasons if trigger line has no numbers
 # - Keeps scoreboard, category totals, highs/lows, exports, debug
 
 import io, os, re, base64, statistics
@@ -46,7 +47,7 @@ def style_table(df: pd.DataFrame, highlight_grand_total: bool = True) -> "pd.io.
     return sty
 
 # ───────────────── HEADER / THEME ─────────────────
-st.set_page_config(page_title="Greeno Big Three v1.8.3", layout="wide")
+st.set_page_config(page_title="Greeno Big Three v1.8.4", layout="wide")
 
 logo_path = "greenosu.webp"
 if os.path.exists(logo_path):
@@ -65,7 +66,7 @@ st.markdown(
 ">
   {logo_html}
   <div style="display:flex; flex-direction:column; justify-content:center;">
-      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.8.3</h1>
+      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.8.4</h1>
       <div style="height:5px; background-color:#F44336; width:300px; margin-top:10px; border-radius:3px;"></div>
   </div>
 </div>
@@ -132,7 +133,7 @@ OTHER_REASONS = [
 ]
 ALL_CANONICAL = MISSING_REASONS + ATTITUDE_REASONS + OTHER_REASONS
 
-# ── Short, robust triggers (lowercase substring matches) ──
+# Short, robust triggers (lowercase substring matches)
 KEYWORD_TRIGGERS = {
     # TO-GO MISSING
     "Missing food": ["missing food"],
@@ -167,7 +168,6 @@ SPECIAL_REASON_SECTIONS = {
     "Out of menu item": {"To Go", "Delivery", "Dine-In"}
 }
 
-# Compensation special handling
 COMP_CANON = "No/insufficient compensation offered"
 
 def _lc(s: str) -> str:
@@ -181,7 +181,7 @@ def _matches_keyword(label_text_lc: str) -> Optional[str]:
     return None
 
 def _is_comp_line(label_lc: str) -> bool:
-    # any piece commonly present in the 2–3 line wrap OR compensation itself
+    # any piece in the 2–3 line wrap OR "compensation" itself
     return (
         "no/unsatisfactory" in label_lc or
         "compensation offered by" in label_lc or
@@ -450,6 +450,29 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes, debug: bool = False):
                             "Reason": canon_reason, "Period": mapped, "Value": int(token),
                         })
 
+            # NEW: wrapper that returns how many tokens we captured
+            def consume_and_count(line_obj, canon_reason: str) -> int:
+                if debug:
+                    before = len(debug_log["token_trace"])
+                    consume_words(line_obj, canon_reason)
+                    after = len(debug_log["token_trace"])
+                    return max(0, after - before)
+                else:
+                    # Heuristic when debug is off: count numeric tokens to the right of label edge
+                    cnt = 0
+                    y_band = line_obj["y"]
+                    for w in line_obj["words"]:
+                        token = w["text"].strip()
+                        if not re.fullmatch(r"-?\d+", token):
+                            continue
+                        if w["x0"] <= label_right_edge:
+                            continue
+                        w_y_mid = _round_to((w["top"] + w["bottom"]) / 2, 2)
+                        if abs(w_y_mid - y_band) <= 0.01:
+                            cnt += 1
+                    consume_words(line_obj, canon_reason)
+                    return cnt
+
             idx = 0
             while idx < len(lines):
                 L = lines[idx]
@@ -519,7 +542,7 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes, debug: bool = False):
                     idx += 1
                     continue
 
-                # Default handling (single-line strict band)
+                # Default handling with ADJACENT-LINE FALLBACK
                 if not canon:
                     if debug:
                         debug_log["unmatched_labels"].append({
@@ -532,7 +555,33 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes, debug: bool = False):
                     idx += 1
                     continue
 
-                consume_words(L, canon)
+                got = consume_and_count(L, canon)
+
+                # If nothing captured on the trigger line, try immediate previous/next (wrapped labels)
+                if got == 0:
+                    tried = False
+                    if idx > 0:
+                        prev_L = lines[idx - 1]
+                        prev_label_lc = _lc(left_label_text(prev_L))
+                        if not is_structural_total(prev_label_lc):
+                            got += consume_and_count(prev_L, canon)
+                            tried = True
+                    if got == 0 and (idx + 1) < len(lines):
+                        next_L = lines[idx + 1]
+                        next_label_lc = _lc(left_label_text(next_L))
+                        if not is_structural_total(next_label_lc):
+                            got += consume_and_count(next_L, canon)
+                            tried = True
+                    if debug and got > 0:
+                        debug_log["events"].append({
+                            "type": "adjacent_capture",
+                            "reason": canon,
+                            "page": page.page_number,
+                            "ad": current_ad,
+                            "store": current_store,
+                            "section": current_section,
+                            "note": "numbers on adjacent line due to wrap"
+                        })
                 idx += 1
 
     return {h: header_positions[h] for h in ordered_headers}, data, ordered_headers, pairs_debug, debug_log
@@ -826,7 +875,7 @@ st.dataframe(style_table(reason_totals_other), use_container_width=True)
 
 # ───────────────── 6) Period change summary ─────────────────
 st.header("6) Period change summary (vs previous period)")
-if not (prior_label):
+if not (prior_label := (ordered_headers[ordered_headers.index(sel_col)-1] if sel_col in ordered_headers and ordered_headers.index(sel_col)>0 else None)):
     st.info("No earlier period available to compare against.")
 else:
     def totals_by_reason_for(period_label: str, reasons: list[str], allowed_sections: set[str]) -> pd.Series:
@@ -843,8 +892,8 @@ else:
         return pd.Series(sums).astype(int)
 
     missing_sections = {"To Go", "Delivery"}
-    attitude_sections = {"To Go", "Delivery", "Dine-In"}
-    other_sections    = {"To Go", "Delivery", "Dine-In"}
+    attitude_sections = {"Dine-In","To Go","Delivery"}
+    other_sections    = {"Dine-In","To Go","Delivery"}
 
     cur_missing = totals_by_reason_for(sel_col,    MISSING_REASONS,  missing_sections)
     prv_missing = totals_by_reason_for(prior_label,MISSING_REASONS,  missing_sections)

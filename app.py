@@ -1,10 +1,10 @@
-# Greeno Big Three v1.7.3 — strict parser (TOTAL-aware bins, left-label) +
-# Quick Glance scoreboard (dynamic green/red border accents; lower = better) +
-# Reason totals (Missing + Attitude + Other) +
-# Period Change Summary (text, dynamic height) +
-# Historical context (lower = better) with highlighted Current cell + KPI cards with dynamic accents +
-# Collapsible ADs + High-contrast tables + Single Excel export
-# Categories: To-go Missing Complaints (To-Go/Delivery) + Attitude (all segments) + Other (all segments)
+# Greeno Big Three v1.7.4 — streamlined display
+# - Quick Glance scoreboard (vs previous period; lower = better) with dynamic borders
+# - Reason Totals (Missing/Attitude/Other) + Category Grand Total metrics
+# - Period Change Summary (text)
+# - Historical Context (KPI cards + high/low tables)
+# - Single Excel export (All Sheets)
+# - Special rule: "Out of menu item" counts Dine-In + To Go + Delivery everywhere
 import io, os, re, base64, statistics
 from collections import defaultdict
 from typing import Dict, List, Tuple, Optional
@@ -16,18 +16,13 @@ try:
 except Exception:
     pdfplumber = None
 
-# ───────────────── STYLING HELPERS (HIGH CONTRAST) ─────────────────
+# ───────────────── STYLING HELPERS ─────────────────
 def style_table(df: pd.DataFrame, highlight_grand_total: bool = True) -> "pd.io.formats.style.Styler":
-    """
-    Alternating row shading + dark text so values are readable in dark mode.
-    Also highlights the '— Grand Total —' row.
-    """
     def zebra(series):
         return [
             "background-color: #F5F7FA" if i % 2 == 0 else "background-color: #E9EDF2"
             for i, _ in enumerate(series)
         ]
-
     sty = (
         df.style
         .set_properties(
@@ -40,22 +35,19 @@ def style_table(df: pd.DataFrame, highlight_grand_total: bool = True) -> "pd.io.
         )
         .apply(zebra, axis=0)
     )
-
     if highlight_grand_total:
         def highlight_total(row):
             if str(row.name) == "— Grand Total —":
                 return ["background-color: #FFE39B; color: #111; font-weight: 700;"] * len(row)
             return [""] * len(row)
         sty = sty.apply(highlight_total, axis=1)
-
-    # Make index header text dark too
     sty = sty.set_table_styles(
         [{"selector": "th.row_heading, th.blank", "props": [("color", "#111"), ("border-color", "#CCD3DB")]}]
     )
     return sty
 
 # ───────────────── HEADER / THEME ─────────────────
-st.set_page_config(page_title="Greeno Big Three v1.7.3", layout="wide")
+st.set_page_config(page_title="Greeno Big Three v1.7.4", layout="wide")
 
 logo_path = "greenosu.webp"
 if os.path.exists(logo_path):
@@ -74,7 +66,7 @@ st.markdown(
 ">
   {logo_html}
   <div style="display:flex; flex-direction:column; justify-content:center;">
-      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.7.3</h1>
+      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.7.4</h1>
       <div style="height:5px; background-color:#F44336; width:300px; margin-top:10px; border-radius:3px;"></div>
   </div>
 </div>
@@ -86,7 +78,7 @@ st.markdown(
 with st.sidebar:
     st.header("1) Upload PDF")
     up = st.file_uploader("Choose the PDF report", type=["pdf"])
-    st.caption("Parses labels from the left side. Missing = To-Go & Delivery; Attitude/Other = all segments.")
+    st.caption("Missing = To-Go/Delivery (except ‘Out of menu item’ includes Dine-In). Attitude/Other = all segments.")
 
 if not up:
     st.markdown(
@@ -147,7 +139,7 @@ ATTITUDE_REASONS = [
     "Argued with guest",
 ]
 
-# Canonical reasons — Other (7, all segments)
+# Canonical reasons — Other (7)
 OTHER_REASONS = [
     "Long hold/no answer",
     "No/insufficient compensation offered",
@@ -160,10 +152,10 @@ OTHER_REASONS = [
 
 ALL_CANONICAL = MISSING_REASONS + ATTITUDE_REASONS + OTHER_REASONS
 
+# Aliases from PDF → canonical
 def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", s.lower()).strip()
 
-# Exact aliases → canonical (strict)
 ALIASES_MISSING = {
     _norm("Missing Item (Food)"):        "Missing food",
     _norm("Order Wrong"):                "Order wrong",
@@ -192,11 +184,15 @@ ALIASES_OTHER = {
     _norm("Didn't Open/close On Time"):                              "Did not open on time",
     _norm("No/Poor Apology"):                                        "No/poor apology",
 }
-
 REASON_ALIASES_NORM = {**ALIASES_MISSING, **ALIASES_ATTITUDE, **ALIASES_OTHER}
 
 def normalize_reason(raw: str) -> Optional[str]:
     return REASON_ALIASES_NORM.get(_norm(raw))
+
+# Special override: this Missing reason includes Dine-In too
+SPECIAL_REASON_SECTIONS = {
+    "Out of menu item": {"To Go", "Delivery", "Dine-In"}
+}
 
 def _round_to(x: float, base: int = 2) -> float:
     return round(x / base) * base
@@ -425,40 +421,57 @@ if not ordered_headers:
     st.error("No period headers (like ‘P9 24’) found.")
     st.stop()
 
-# ───────────────── PERIOD SELECTION ─────────────────
+# ───────────────── PERIOD PICKER ─────────────────
 st.header("2) Pick the period")
 sel_col = st.selectbox("Period", options=ordered_headers, index=len(ordered_headers)-1)
 
-# ───────────────── QUICK GLANCE SCOREBOARD (vs previous period; lower=better) ─────────────────
-st.markdown("### Quick glance")
+# ───────────────── AGG HELPERS (with Out-of-menu override) ─────────────────
+def _allowed_sections_for_reason(reason: str, default_sections: set[str]) -> set[str]:
+    return SPECIAL_REASON_SECTIONS.get(reason, default_sections)
 
-def _total_for(period_label: str, reasons: list[str], sections: set[str]) -> int:
+def _total_for(period_label: str, reasons: list[str], default_sections: set[str]) -> int:
     if not period_label:
         return 0
     total = 0
     for ad, stores in raw_data.items():
         for store, sects in stores.items():
             for sec_name, reason_map in sects.items():
-                if sec_name not in sections:
-                    continue
                 per = reason_map.get("__all__", {})
                 for r in reasons:
+                    allowed = _allowed_sections_for_reason(r, default_sections)
+                    if sec_name not in allowed:
+                        continue
                     total += int(per.get(r, {}).get(period_label, 0))
     return int(total)
 
-# Period context (previous = immediately left of selected)
+def _totals_by_period(reasons: list[str], default_sections: set[str]) -> Dict[str, int]:
+    res = {p: 0 for p in ordered_headers}
+    for ad, stores in raw_data.items():
+        for store, sects in stores.items():
+            for sec_name, reason_map in sects.items():
+                per = reason_map.get("__all__", {})
+                for r in reasons:
+                    allowed = _allowed_sections_for_reason(r, default_sections)
+                    if sec_name not in allowed:
+                        continue
+                    for p in ordered_headers:
+                        res[p] += int(per.get(r, {}).get(p, 0))
+    return res
+
+# ───────────────── QUICK GLANCE (vs previous) ─────────────────
+st.markdown("### Quick glance")
+
+# previous period (immediately left)
 try:
     cur_idx = ordered_headers.index(sel_col)
     prior_label = ordered_headers[cur_idx - 1] if cur_idx > 0 else None
 except ValueError:
     prior_label = None
 
-# Category scopes
 missing_sections = {"To Go", "Delivery"}
 att_sections     = {"To Go", "Delivery", "Dine-In"}
 other_sections   = {"To Go", "Delivery", "Dine-In"}
 
-# Current/prior totals
 tot_missing_cur = _total_for(sel_col,     MISSING_REASONS,  missing_sections)
 tot_att_cur     = _total_for(sel_col,     ATTITUDE_REASONS, att_sections)
 tot_other_cur   = _total_for(sel_col,     OTHER_REASONS,    other_sections)
@@ -469,28 +482,30 @@ tot_other_prv   = _total_for(prior_label, OTHER_REASONS,    other_sections)
 overall_cur = tot_missing_cur + tot_att_cur + tot_other_cur
 overall_prv = (tot_missing_prv + tot_att_prv + tot_other_prv) if prior_label else 0
 
-# Deltas (numbers) and formatting
 def diff_val(cur, prv, has_prior): 
     return (cur - prv) if has_prior else None
 def fmt_diff(d): 
     return "n/a" if d is None else f"{d:+d}"
+def cls_from_delta(d):
+    if d is None: return ""
+    return " best" if d < 0 else (" worst" if d > 0 else "")
 
 overall_diff = diff_val(overall_cur, overall_prv, prior_label is not None)
 miss_diff    = diff_val(tot_missing_cur, tot_missing_prv, prior_label is not None)
 att_diff     = diff_val(tot_att_cur,     tot_att_prv,     prior_label is not None)
 oth_diff     = diff_val(tot_other_cur,   tot_other_prv,   prior_label is not None)
 
-# Tile color class from delta (vs previous): green if improved (↓), red if worse (↑)
-def cls_from_delta(d):
-    if d is None: return ""
-    return " best" if d < 0 else (" worst" if d > 0 else "")
-
 overall_cls = cls_from_delta(overall_diff)
 missing_cls = cls_from_delta(miss_diff)
 att_cls     = cls_from_delta(att_diff)
 other_cls   = cls_from_delta(oth_diff)
 
-# Clearer borders + colored deltas + explicit “vs {prior}”
+def diff_class(d):
+    if d is None: return ""
+    return "neg" if d < 0 else ("pos" if d > 0 else "zero")
+
+prior_text = prior_label or "n/a"
+
 score_css = """
 <style>
 .score-wrap{display:flex;gap:16px;margin:10px 0 8px 0}
@@ -500,20 +515,14 @@ score_css = """
 .score h4{margin:0 0 8px 0;font-weight:700;font-size:1.15rem;color:#cfd8e3}
 .score .num{font-size:3rem;line-height:1.1;font-weight:800;color:#fff;margin:2px 0 2px}
 .score .delta{margin-top:6px;font-size:1.05rem}
-.delta.neg{color:#66BB6A}   /* lower = better (green) */
-.delta.pos{color:#EF5350}   /* higher = worse (red)   */
+.delta.neg{color:#66BB6A}
+.delta.pos{color:#EF5350}
 .delta.zero{color:#9fb3c8}
 .delta .vs{opacity:.85;margin-left:8px}
 @media (max-width:900px){.score-wrap{flex-direction:column}}
 </style>
 """
 st.markdown(score_css, unsafe_allow_html=True)
-
-def diff_class(d):
-    if d is None: return ""
-    return "neg" if d < 0 else ("pos" if d > 0 else "zero")
-
-prior_text = prior_label or "n/a"
 
 score_html = f"""
 <div class="score-wrap">
@@ -540,13 +549,12 @@ score_html = f"""
 </div>
 """
 st.markdown(score_html, unsafe_allow_html=True)
-
-# Helper caption
 if prior_label:
     st.caption(f"Δ shows change vs previous period ({prior_label}). Lower is better.")
 else:
     st.caption("No previous period available — deltas shown as n/a. Lower is better.")
-# ───────────────── BUILD RESULTS ─────────────────
+
+# ───────────────── BUILD ROWS (for summaries & export) ─────────────────
 rows = []
 for ad, stores in raw_data.items():
     for store, sections in stores.items():
@@ -569,6 +577,18 @@ if df.empty:
     st.warning("No matching reasons found for the selected period.")
     st.stop()
 
+# For export only (not displayed)
+store_totals = (
+    df.groupby(["Area Director","Store"], as_index=False)["Value"].sum()
+      .rename(columns={"Value":"Store Total"})
+)
+ad_totals = (
+    store_totals.groupby("Area Director", as_index=False)["Store Total"].sum()
+                .rename(columns={"Store Total":"AD Total"})
+)
+df_detail = df.merge(store_totals, on=["Area Director","Store"], how="left") \
+              .merge(ad_totals, on="Area Director", how="left")
+
 # ───────────────── CATEGORY MAPPING ─────────────────
 CATEGORY_TOGO_MISSING = "To-go Missing Complaints"
 CATEGORY_ATTITUDE     = "Attitude"
@@ -579,83 +599,52 @@ CATEGORY_MAP.update({r: CATEGORY_ATTITUDE for r in ATTITUDE_REASONS})
 CATEGORY_MAP.update({r: CATEGORY_OTHER for r in OTHER_REASONS})
 df["Category"] = df["Reason"].map(CATEGORY_MAP).fillna("Unassigned")
 
-# ───────────────── DISPLAY (collapsible AD sections) ─────────────────
-st.success("✅ Parsed with strict labels & TOTAL-aware bins.")
-st.subheader(f"Results for period: {sel_col}")
-
-col1, col2 = st.columns([1, 3])
-with col1:
-    expand_all = st.toggle("Expand all Area Directors", value=False, help="Show all stores & reason pivots for each AD")
-
-with col2:
-    ad_totals = (
-        df.groupby(["Area Director","Store"], as_index=False)["Value"].sum()
-          .groupby("Area Director", as_index=False)["Value"].sum()
-          .rename(columns={"Value":"AD Total"})
-    )
-    st.dataframe(style_table(ad_totals, highlight_grand_total=False), use_container_width=True,
-                 height=min(400, 60 + 28 * max(2, len(ad_totals))))
-
-# per-store + per-AD totals (all rows)
-store_totals = (
-    df.groupby(["Area Director","Store"], as_index=False)["Value"].sum()
-      .rename(columns={"Value":"Store Total"})
-)
-df_detail = df.merge(store_totals, on=["Area Director","Store"], how="left") \
-              .merge(ad_totals, on="Area Director", how="left")
-
-ads = df_detail["Area Director"].dropna().unique().tolist()
-for ad in ads:
-    sub = df_detail[df_detail["Area Director"]==ad].copy()
-    ad_total_val = int(sub['AD Total'].iloc[0])
-    with st.expander(f"👤 {ad} — AD Total: {ad_total_val}", expanded=expand_all):
-        stores = sub["Store"].dropna().unique().tolist()
-        for store in stores:
-            substore = sub[sub["Store"]==store].copy()
-            store_total = int(substore["Store Total"].iloc[0])
-            st.markdown(f"**{store}**  — Store Total: **{store_total}**")
-            show_reasons = MISSING_REASONS + ATTITUDE_REASONS + OTHER_REASONS
-            pivot = (
-                substore[substore["Reason"].isin(show_reasons)]
-                .pivot_table(index="Reason", columns="Section", values="Value", aggfunc="sum", fill_value=0)
-                .reindex(show_reasons)
-            )
-            pivot["Total"] = pivot.sum(axis=1)
-            st.dataframe(style_table(pivot, highlight_grand_total=False), use_container_width=True)
-
 # ───────────────── REASON TOTALS — Missing ─────────────────
 st.header("4) Reason totals — To-go Missing Complaints (selected period)")
-st.caption("To-Go and Delivery only, for the seven Missing reasons.")
+st.caption("To-Go and Delivery columns shown; Total for “Out of menu item” includes Dine-In as well.")
 
-missing_df = df[df["Reason"].isin(MISSING_REASONS) & df["Section"].isin({"To Go","Delivery"})]
+missing_df = df[df["Reason"].isin(MISSING_REASONS) & df["Section"].isin({"To Go","Delivery","Dine-In"})]
 
 def _order_series_missing(s: pd.Series) -> pd.Series:
     return s.reindex(MISSING_REASONS)
 
-tot_to_go = (
+tot_togo = (
     missing_df[missing_df["Section"] == "To Go"]
-      .groupby("Reason", as_index=True)["Value"].sum().astype(int)
+      .groupby("Reason", as_index=True)["Value"].sum()
 )
 tot_delivery = (
     missing_df[missing_df["Section"] == "Delivery"]
-      .groupby("Reason", as_index=True)["Value"].sum().astype(int)
+      .groupby("Reason", as_index=True)["Value"].sum()
 )
-tot_overall = (
-    missing_df.groupby("Reason", as_index=True)["Value"].sum().astype(int)
+tot_dinein = (
+    missing_df[missing_df["Section"] == "Dine-In"]
+      .groupby("Reason", as_index=True)["Value"].sum()
 )
+
+# Base Total = To Go + Delivery
+total_series = tot_togo.add(tot_delivery, fill_value=0)
+
+# Add Dine-In ONLY for “Out of menu item”
+if "Out of menu item" in total_series.index or "Out of menu item" in tot_dinein.index:
+    total_series.loc["Out of menu item"] = (
+        float(total_series.get("Out of menu item", 0)) + float(tot_dinein.get("Out of menu item", 0))
+    )
 
 reason_totals_missing = pd.DataFrame({
-    "To Go": _order_series_missing(tot_to_go),
-    "Delivery": _order_series_missing(tot_delivery),
-    "Total": _order_series_missing(tot_overall),
-}).fillna(0).astype(int)
-reason_totals_missing.loc["— Grand Total —"] = reason_totals_missing.sum(numeric_only=True)
+    "To Go": _order_series_missing(tot_togo).fillna(0).astype(int),
+    "Delivery": _order_series_missing(tot_delivery).fillna(0).astype(int),
+    "Total": _order_series_missing(total_series).fillna(0).astype(int),
+})
 
+cat_grand_total_missing = int(reason_totals_missing["Total"].sum())
+st.metric("Category Grand Total — To-go Missing Complaints", cat_grand_total_missing)
+
+reason_totals_missing.loc["— Grand Total —"] = reason_totals_missing.sum(numeric_only=True)
 st.dataframe(style_table(reason_totals_missing), use_container_width=True)
 
 # ───────────────── REASON TOTALS — Attitude ─────────────────
 st.header("4b) Reason totals — Attitude (selected period)")
-st.caption("All segments (Dine-In, To Go, Delivery) for the seven Attitude reasons.")
+st.caption("All segments (Dine-In, To Go, Delivery).")
 
 att_df = df[df["Reason"].isin(ATTITUDE_REASONS)]
 
@@ -684,13 +673,16 @@ reason_totals_attitude = pd.DataFrame({
     "Delivery": _order_series_att(att_delivery),
     "Total": _order_series_att(att_total),
 }).fillna(0).astype(int)
-reason_totals_attitude.loc["— Grand Total —"] = reason_totals_attitude.sum(numeric_only=True)
 
+cat_grand_total_att = int(reason_totals_attitude["Total"].sum())
+st.metric("Category Grand Total — Attitude", cat_grand_total_att)
+
+reason_totals_attitude.loc["— Grand Total —"] = reason_totals_attitude.sum(numeric_only=True)
 st.dataframe(style_table(reason_totals_attitude), use_container_width=True)
 
 # ───────────────── REASON TOTALS — Other ─────────────────
 st.header("4c) Reason totals — Other (selected period)")
-st.caption("All segments (Dine-In, To Go, Delivery) for the seven Other reasons.")
+st.caption("All segments (Dine-In, To Go, Delivery).")
 
 oth_df = df[df["Reason"].isin(OTHER_REASONS)]
 
@@ -719,46 +711,14 @@ reason_totals_other = pd.DataFrame({
     "Delivery": _order_series_other(oth_delivery),
     "Total": _order_series_other(oth_total),
 }).fillna(0).astype(int)
-reason_totals_other.loc["— Grand Total —"] = reason_totals_other.sum(numeric_only=True)
 
+cat_grand_total_other = int(reason_totals_other["Total"].sum())
+st.metric("Category Grand Total — Other", cat_grand_total_other)
+
+reason_totals_other.loc["— Grand Total —"] = reason_totals_other.sum(numeric_only=True)
 st.dataframe(style_table(reason_totals_other), use_container_width=True)
 
-# ───────────────── CATEGORY SUMMARIES ─────────────────
-def category_summary_block(number_label: str, category_name: str, allowed_sections: set):
-    st.header(f"{number_label}) Category summary — {category_name}")
-    subset = df[(df["Category"] == category_name) & (df["Section"].isin(allowed_sections))]
-    if subset.empty:
-        st.info(f"No rows currently mapped to “{category_name}”.")
-        return None, None, 0
-    cat_store_totals = (
-        subset.groupby(["Area Director", "Store"], as_index=False)["Value"]
-              .sum().rename(columns={"Value": "Category Total"})
-    )
-    cat_ad_totals = (
-        cat_store_totals.groupby("Area Director", as_index=False)["Category Total"]
-                        .sum().rename(columns={"Category Total": "AD Category Total"})
-    )
-    cat_grand_total = int(cat_store_totals["Category Total"].sum())
-    colA, colB = st.columns([1, 3])
-    with colA:
-        st.metric("Grand Total (Category)", cat_grand_total)
-    with colB:
-        st.dataframe(style_table(cat_ad_totals, highlight_grand_total=False),
-                     use_container_width=True,
-                     height=min(400, 60 + 28 * max(2, len(cat_ad_totals))))
-    st.subheader("Per-Store Category Totals")
-    st.caption(f"Each store’s total for “{category_name}” in the selected period.")
-    st.dataframe(style_table(cat_store_totals, highlight_grand_total=False), use_container_width=True)
-    return cat_ad_totals, cat_store_totals, cat_grand_total
-
-# 5a — To-go Missing Complaints (To-Go + Delivery only)
-tgc_ad_totals, tgc_store_totals, tgc_grand = category_summary_block("5a", "To-go Missing Complaints", {"To Go","Delivery"})
-# 5b — Attitude (all segments)
-att_ad_totals, att_store_totals, att_grand = category_summary_block("5b", "Attitude", {"To Go","Delivery","Dine-In"})
-# 5c — Other (all segments)
-oth_ad_totals, oth_store_totals, oth_grand = category_summary_block("5c", "Other", {"To Go","Delivery","Dine-In"})
-
-# ───────────────── 6) PERIOD CHANGE SUMMARY (vs previous) ─────────────────
+# ───────────────── 6) PERIOD CHANGE SUMMARY ─────────────────
 st.header("6) Period change summary (vs previous period)")
 if not prior_label:
     st.info("No earlier period available to compare against.")
@@ -768,10 +728,11 @@ else:
         for ad, stores in raw_data.items():
             for store, sections in stores.items():
                 for section, reason_map in sections.items():
-                    if section not in allowed_sections:
-                        continue
                     per = reason_map.get("__all__", {})
                     for r in reasons:
+                        allowed = _allowed_sections_for_reason(r, allowed_sections)
+                        if section not in allowed:
+                            continue
                         sums[r] += int(per.get(r, {}).get(period_label, 0))
         return pd.Series(sums).astype(int)
 
@@ -800,7 +761,7 @@ else:
     lines = []
     lines.append(f"Selected period: {sel_col}   •   Prior: {prior_label}")
     lines.append("")
-    lines.append("To-go Missing Complaints (To-Go + Delivery)")
+    lines.append("To-go Missing Complaints (To-Go + Delivery; ‘Out of menu item’ also includes Dine-In)")
     lines.append(f"- Overall: {total_missing_cur} ({fmt_delta(total_missing_cur - total_missing_prv)} vs prior)")
     any_change_missing = False
     for r in MISSING_REASONS:
@@ -844,19 +805,20 @@ else:
         mime="text/plain",
     )
 
-# ───────────────── 7) Historical context — highs/lows vs all periods (lower = better) ─────────────────
+# ───────────────── 7) Historical context — highs/lows vs all periods ─────────────────
 st.header("7) Historical context — highs/lows vs all periods (lower = better)")
 
-def build_reason_period_matrix(reasons: list[str], allowed_sections: set[str]) -> dict[str, dict[str, int]]:
-    """Returns: {period -> {reason -> total}} across all ADs/stores for allowed sections."""
+def build_reason_period_matrix(reasons: list[str], default_sections: set[str]) -> dict[str, dict[str, int]]:
+    """Returns: {period -> {reason -> total}} across all ADs/stores with per-reason overrides."""
     mat = {p: {r: 0 for r in reasons} for p in ordered_headers}
     for ad, stores in raw_data.items():
         for store, sections_map in stores.items():
             for sec, reason_map in sections_map.items():
-                if sec not in allowed_sections:
-                    continue
                 per = reason_map.get("__all__", {})
                 for r in reasons:
+                    allowed = _allowed_sections_for_reason(r, default_sections)
+                    if sec not in allowed:
+                        continue
                     pr = per.get(r, {})
                     for p in ordered_headers:
                         mat[p][r] += int(pr.get(p, 0))
@@ -873,8 +835,8 @@ def build_highlow_tables(reasons: list[str], allowed_sections: set[str], title: 
     worst_vals = {}
     for r in reasons:
         series = [(p, mat[p][r]) for p in ordered_headers]
-        best_period, best_val = min(series, key=lambda kv: kv[1])   # lowest value = best
-        worst_period, worst_val = max(series, key=lambda kv: kv[1]) # highest value = worst
+        best_period, best_val = min(series, key=lambda kv: kv[1])   # lowest = best
+        worst_period, worst_val = max(series, key=lambda kv: kv[1]) # highest = worst
         best_vals[r] = best_val
         worst_vals[r] = worst_val
         sorted_asc = sorted(series, key=lambda kv: kv[1])
@@ -890,7 +852,7 @@ def build_highlow_tables(reasons: list[str], allowed_sections: set[str], title: 
 
     df_reasons = pd.DataFrame(rows).set_index("Reason")
 
-    # Style: highlight Current cell if it equals best (green) or worst (red)
+    # Style: highlight Current if equals best (green) or worst (red)
     def highlight_current(col: pd.Series):
         styles = []
         for reason, val in col.items():
@@ -953,7 +915,7 @@ def build_highlow_tables(reasons: list[str], allowed_sections: set[str], title: 
     sty = style_table(df_reasons, highlight_grand_total=False).apply(highlight_current, subset=["Current"])
     st.dataframe(sty, use_container_width=True)
 
-# Missing → To-Go & Delivery only
+# Missing → To-Go & Delivery default (override applies to Out of menu item)
 build_highlow_tables(MISSING_REASONS, {"To Go","Delivery"}, "7a) To-go Missing Complaints (To-Go + Delivery) — highs/lows")
 
 # Attitude → All segments
@@ -962,9 +924,8 @@ build_highlow_tables(ATTITUDE_REASONS, {"Dine-In","To Go","Delivery"}, "7b) Atti
 # Other → All segments
 build_highlow_tables(OTHER_REASONS, {"Dine-In","To Go","Delivery"}, "7c) Other (All segments) — highs/lows")
 
-# ───────────────── 8) EXPORT — Excel only (All Sheets) ─────────────────
+# ───────────────── 8) EXPORT — Excel (All Sheets) ─────────────────
 st.header("8) Export results")
-
 buff = io.BytesIO()
 with pd.ExcelWriter(buff, engine="openpyxl") as writer:
     # Detail + rollups
@@ -975,19 +936,6 @@ with pd.ExcelWriter(buff, engine="openpyxl") as writer:
     reason_totals_missing.to_excel(writer, sheet_name="Reason Totals (Missing)")
     reason_totals_attitude.to_excel(writer, sheet_name="Reason Totals (Attitude)")
     reason_totals_other.to_excel(writer, sheet_name="Reason Totals (Other)")
-    # Category sheets
-    (tgc_ad_totals if tgc_ad_totals is not None else pd.DataFrame(columns=["Area Director","AD Category Total"])) \
-        .to_excel(writer, index=False, sheet_name="Cat-ToGoMissing AD Totals")
-    (tgc_store_totals if tgc_store_totals is not None else pd.DataFrame(columns=["Area Director","Store","Category Total"])) \
-        .to_excel(writer, index=False, sheet_name="Cat-ToGoMissing Store")
-    (att_ad_totals if att_ad_totals is not None else pd.DataFrame(columns=["Area Director","AD Category Total"])) \
-        .to_excel(writer, index=False, sheet_name="Cat-Attitude AD Totals")
-    (att_store_totals if att_store_totals is not None else pd.DataFrame(columns=["Area Director","Store","Category Total"])) \
-        .to_excel(writer, index=False, sheet_name="Cat-Attitude Store")
-    (oth_ad_totals if oth_ad_totals is not None else pd.DataFrame(columns=["Area Director","AD Category Total"])) \
-        .to_excel(writer, index=False, sheet_name="Cat-Other AD Totals")
-    (oth_store_totals if oth_store_totals is not None else pd.DataFrame(columns=["Area Director","Store","Category Total"])) \
-        .to_excel(writer, index=False, sheet_name="Cat-Other Store")
 
 st.download_button(
     "📥 Download Excel (All Sheets)",
@@ -995,11 +943,3 @@ st.download_button(
     file_name=f"ad_store_{sel_col.replace(' ','_')}.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
-
-# ───────────────── DEBUG / VERIFICATION ─────────────────
-with st.expander("🧪 Debug: AD ↔ Store pairs detected this run"):
-    if pairs_debug:
-        st.dataframe(style_table(pd.DataFrame(pairs_debug, columns=["Area Director","Store"]), highlight_grand_total=False),
-                     use_container_width=True)
-    else:
-        st.caption("No pairs captured (unexpected).")

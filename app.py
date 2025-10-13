@@ -1,19 +1,13 @@
-# Greeno Big Three v1.7.8 — DEBUG + robust wrap/carryover for "No/Unsatisfactory Compensation Offered By (Restaurant)"
+# Greeno Big Three v1.7.9 — Signature Matching
+# - Keyword-based matching for reasons (robust to line wraps & page breaks)
+# - When a keyword hits, also include numeric tokens from the next line (if it's a continuation)
 # - Quick Glance (vs previous period; lower = better)
 # - Reason Totals (Missing/Attitude/Other) + Category Grand Totals
 # - Period Change Summary (text)
 # - Historical Context (best/worst across all periods)
 # - Single Excel export (All Sheets)
 # - Special rule: "Out of menu item" counts Dine-In + To Go + Delivery everywhere
-# - Parser fixes:
-#     * detect & merge two/three-line wrapped reason labels (same page)
-#     * carry partial labels across a page break and merge on next page (2- or 3-line)
-# - DEBUG MODE adds:
-#     * unmatched labels panel
-#     * wrap/carryover counters
-#     * ignored tokens panel (out of bins / under TOTAL)
-#     * token trace panel (filter by reason & period)
-#     * post-parse blue notices with quick counts
+# - Debug panels (Unmatched labels, Ignored tokens, Token trace)
 
 import io, os, re, base64, statistics
 from collections import defaultdict
@@ -57,7 +51,7 @@ def style_table(df: pd.DataFrame, highlight_grand_total: bool = True) -> "pd.io.
     return sty
 
 # ───────────────── HEADER / THEME ─────────────────
-st.set_page_config(page_title="Greeno Big Three v1.7.8", layout="wide")
+st.set_page_config(page_title="Greeno Big Three v1.7.9", layout="wide")
 
 logo_path = "greenosu.webp"
 if os.path.exists(logo_path):
@@ -76,7 +70,7 @@ st.markdown(
 ">
   {logo_html}
   <div style="display:flex; flex-direction:column; justify-content:center;">
-      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.7.8</h1>
+      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.7.9</h1>
       <div style="height:5px; background-color:#F44336; width:300px; margin-top:10px; border-radius:3px;"></div>
   </div>
 </div>
@@ -158,45 +152,45 @@ OTHER_REASONS = [
 ]
 ALL_CANONICAL = MISSING_REASONS + ATTITUDE_REASONS + OTHER_REASONS
 
-# Aliases from PDF → canonical
-def _norm(s: str) -> str:
-    return re.sub(r"[^a-z0-9]+", " ", s.lower()).strip()
+# Keyword signature map (lowercased fragments → canonical)
+# Keep fragments unique to avoid collisions with non-tracked labels.
+KEYWORD_MAP = [
+    # MISSING
+    ("missing item (food)",          "Missing food"),
+    ("order wrong",                  "Order wrong"),
+    ("missing condiments",           "Missing condiments"),
+    ("out of menu item",             "Out of menu item"),
+    ("missing item (bev)",           "Missing bev"),
+    ("missing ingredient (food)",    "Missing ingredients"),
+    ("packaging to go complaint",    "Packaging to-go complaint"),
+    # ATTITUDE
+    ("unprofessional behavior",      "Unprofessional/Unfriendly"),
+    ("unfriendly attitude",          "Unprofessional/Unfriendly"),
+    ("manager directly involved",    "Manager directly involved"),
+    ("management not available",     "Manager not available"),
+    ("manager did not visit",        "Manager did not visit"),
+    ("negative manager-employee interaction", "Negative mgr-employee exchange"),
+    ("manager did not follow up",    "Manager did not follow up"),
+    ("argued with guest",            "Argued with guest"),
+    # OTHER
+    ("long hold/no answer",          "Long hold/no answer"),
+    ("no/unsatisfactory",            "No/insufficient compensation offered"),  # signature fragment
+    ("did not attempt to resolve issue", "Did not attempt to resolve"),
+    ("guest left without dining or ordering", "Guest left without ordering"),
+    ("unknowledgeable",              "Unknowledgeable"),
+    ("didn't open/close on time",    "Did not open on time"),
+    ("no/poor apology",              "No/poor apology"),
+]
 
-ALIASES_MISSING = {
-    _norm("Missing Item (Food)"):        "Missing food",
-    _norm("Order Wrong"):                "Order wrong",
-    _norm("Missing Condiments"):         "Missing condiments",
-    _norm("Out Of Menu Item"):           "Out of menu item",
-    _norm("Missing Item (Bev)"):         "Missing bev",
-    _norm("Missing Ingredient (Food)"):  "Missing ingredients",
-    _norm("Packaging To Go Complaint"):  "Packaging to-go complaint",
-}
-ALIASES_ATTITUDE = {
-    _norm("Unprofessional Behavior"):                 "Unprofessional/Unfriendly",
-    _norm("Unfriendly Attitude"):                     "Unprofessional/Unfriendly",
-    _norm("Manager Directly Involved In Complaint"):  "Manager directly involved",
-    _norm("Management Not Available"):                "Manager not available",
-    _norm("Manager Did Not Visit"):                   "Manager did not visit",
-    _norm("Negative Manager-Employee Interaction"):   "Negative mgr-employee exchange",
-    _norm("Manager Did Not Follow Up"):               "Manager did not follow up",
-    _norm("Argued With Guest"):                       "Argued with guest",
-}
-ALIASES_OTHER = {
-    _norm("Long Hold/No Answer/Hung Up"):                            "Long hold/no answer",
-    _norm("No/Unsatisfactory Compensation Offered By Restaurant"):   "No/insufficient compensation offered",
-    _norm("Did Not Attempt To Resolve Issue"):                       "Did not attempt to resolve",
-    _norm("Guest Left Without Dining or Ordering"):                  "Guest left without ordering",
-    _norm("Unknowledgeable"):                                        "Unknowledgeable",
-    _norm("Didn't Open/close On Time"):                              "Did not open on time",
-    _norm("No/Poor Apology"):                                        "No/poor apology",
-}
-# Short-form alias for 2-line version without "Restaurant"
-ALIASES_OTHER[_norm("No/Unsatisfactory Compensation Offered By")] = "No/insufficient compensation offered"
+# Normalize helpers
+def _lc(s: str) -> str:
+    return re.sub(r"\s+", " ", s.lower().strip())
 
-REASON_ALIASES_NORM = {**ALIASES_MISSING, **ALIASES_ATTITUDE, **ALIASES_OTHER}
-
-def normalize_reason(raw: str) -> Optional[str]:
-    return REASON_ALIASES_NORM.get(_norm(raw))
+def _matches_keyword(label_text_lc: str) -> Optional[str]:
+    for frag, canon in KEYWORD_MAP:
+        if frag in label_text_lc:
+            return canon
+    return None
 
 # Special override: this Missing reason includes Dine-In too
 SPECIAL_REASON_SECTIONS = {
@@ -333,7 +327,7 @@ def find_ad_for_store(lines: List[dict], store_idx: int, left_margin: float, bac
             return s
     return None
 
-# ───────────────── PARSER ─────────────────
+# ───────────────── PARSER (Signature Matching) ─────────────────
 def parse_pdf_build_ad_store_period_map(file_bytes: bytes, debug: bool = False):
     header_positions: Dict[str, float] = {}
     ordered_headers: List[str] = []
@@ -343,17 +337,12 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes, debug: bool = False):
         lambda: defaultdict(lambda: defaultdict(dict))
     )
 
-    # Debug tracking containers
     debug_log = {
         "unmatched_labels": [],
-        "wrap_merges": 0,
-        "carry_merges": 0,
         "ignored_tokens": [],
         "token_trace": [],
-        "events": [],  # short messages surfaced after parse
+        "events": [],
     }
-
-    carryover_partial = None  # holds a partial label that broke at a page end
 
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
         carry_headers = None
@@ -363,7 +352,6 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes, debug: bool = False):
             if not headers:
                 continue
             carry_headers = headers[:]
-
             for htxt, xc, _ in headers:
                 header_positions[htxt] = xc
             ordered_headers = sort_headers(list(header_positions.keys()))
@@ -374,7 +362,8 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes, debug: bool = False):
             header_bins = build_header_bins({h: header_positions[h] for h in ordered_headers}, total_x)
 
             first_period_x = min(header_positions[h] for h in ordered_headers)
-            label_right_edge = first_period_x - 12  # keep labels strictly left of first period
+            # make label cutoff a bit more permissive to avoid clipping
+            label_right_edge = first_period_x - 10
 
             lines = extract_words_grouped(page)
             if not lines:
@@ -392,103 +381,6 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes, debug: bool = False):
                     if w["x1"] <= label_right_edge and w["text"].strip()
                 ).strip()
 
-            # ─── Handle carryover from previous page with 2- or 3-part merge
-            if carryover_partial:
-                look_ahead_limit = min(4, len(lines))  # peek deeper for 3-line joins
-                merged = False
-
-                def _is_structural(t: str) -> bool:
-                    return (
-                        STORE_LINE_RX.match(t) or t in HEADINGS or
-                        SECTION_TOGO.match(t) or SECTION_DELIV.match(t) or SECTION_DINEIN.match(t)
-                    )
-
-                for k in range(look_ahead_limit):
-                    L0 = lines[k]
-                    nxt_txt0 = L0["text"].strip()
-                    if _is_structural(nxt_txt0):
-                        continue
-                    label_text_2 = left_label_text(L0)
-                    if not label_text_2:
-                        continue
-
-                    combined_label_2 = (carryover_partial["label_text_1"] + " " + label_text_2).strip()
-                    canon2 = normalize_reason(combined_label_2)
-
-                    canon3 = None
-                    combined_label_3 = None
-                    k2 = None
-                    if not canon2 and (k + 1) < len(lines):
-                        L1b = lines[k + 1]
-                        nxt_txt1b = L1b["text"].strip()
-                        if not _is_structural(nxt_txt1b):
-                            label_text_3 = left_label_text(L1b)
-                            if label_text_3:
-                                combined_label_3 = (combined_label_2 + " " + label_text_3).strip()
-                                canon3 = normalize_reason(combined_label_3)
-                                if not canon3:
-                                    # fallback for short-form without "Restaurant"
-                                    canon3 = normalize_reason(combined_label_2)
-
-                                if canon3:
-                                    k2 = k + 1
-
-                    if canon3 or canon2:
-                        final_canon = canon3 or canon2
-                        sect = data[carryover_partial["ad"]].setdefault(
-                            carryover_partial["store"], {}
-                        ).setdefault(carryover_partial["section"], {})
-                        per_header = sect.setdefault("__all__", defaultdict(lambda: defaultdict(int)))
-
-                        combined_words = list(carryover_partial["words"]) + list(L0["words"])
-                        if canon3 and k2 is not None:
-                            combined_words += list(lines[k2]["words"])
-
-                        for w in combined_words:
-                            token = w["text"].strip()
-                            if not re.fullmatch(r"-?\d+", token):
-                                continue
-                            if w["x0"] <= label_right_edge:
-                                continue
-                            xmid = (w["x0"] + w["x1"]) / 2
-                            mapped = map_x_to_header(header_bins, xmid)
-                            if mapped is None or mapped not in ordered_headers:
-                                if debug:
-                                    debug_log["ignored_tokens"].append({
-                                        "page": page.page_number,
-                                        "token": token,
-                                        "xmid": xmid,
-                                        "reason": final_canon,
-                                        "store": carryover_partial["store"],
-                                        "section": carryover_partial["section"],
-                                    })
-                                continue
-                            per_header[final_canon][mapped] += int(token)
-                            if debug:
-                                debug_log["token_trace"].append({
-                                    "page": page.page_number,
-                                    "ad": carryover_partial["ad"],
-                                    "store": carryover_partial["store"],
-                                    "section": carryover_partial["section"],
-                                    "reason": final_canon,
-                                    "period": mapped,
-                                    "value": int(token),
-                                })
-
-                        if canon3 and k2 is not None:
-                            lines.pop(k2)
-                        lines.pop(k)
-                        if debug:
-                            debug_log["carry_merges"] += 1
-                            debug_log["events"].append(
-                                f"Page {page.page_number}: carryover merged as '{final_canon}'"
-                            )
-                        merged = True
-                        break
-
-                carryover_partial = None  # clear once attempted
-
-            # ────── MAIN PARSING LOOP (wrapped label aware; supports 2/3 lines) ──────
             idx = 0
             while idx < len(lines):
                 L = lines[idx]
@@ -522,64 +414,20 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes, debug: bool = False):
                     idx += 1
                     continue
 
-                # Step 1: try single-line label
+                # Signature matching on THIS line
                 label_text_1 = left_label_text(L)
-                canon = normalize_reason(label_text_1)
+                canon = _matches_keyword(_lc(label_text_1))
 
-                # Step 2: if no match, check for wrapped label over next 1–2 lines
-                consumed_lines = 1
-                combined_words = list(L["words"])
-
-                def _is_structural(t: str) -> bool:
-                    return (
-                        STORE_LINE_RX.match(t) or t in HEADINGS or
-                        SECTION_TOGO.match(t) or SECTION_DELIV.match(t) or SECTION_DINEIN.match(t)
-                    )
-
-                if not canon and (idx + 1) < len(lines):
+                # If we hit a keyword, also consider numeric tokens from the NEXT line
+                # when it's likely a wrap continuation (not a new store/section/heading).
+                include_next_words = False
+                if canon and (idx + 1) < len(lines):
                     L2 = lines[idx + 1]
-                    nxt_txt = L2["text"].strip()
-                    if not _is_structural(nxt_txt):
-                        label_text_2 = left_label_text(L2)
-                        if label_text_2:
-                            combined_label_2 = (label_text_1 + " " + label_text_2).strip()
-                            canon2 = normalize_reason(combined_label_2)
+                    t2 = L2["text"].strip()
+                    if not (STORE_LINE_RX.match(t2) or t2 in HEADINGS or
+                            SECTION_TOGO.match(t2) or SECTION_DELIV.match(t2) or SECTION_DINEIN.match(t2)):
+                        include_next_words = True
 
-                            # Try 3-line join if still not matched
-                            canon3 = None
-                            combined_label_3 = None
-                            if not canon2 and (idx + 2) < len(lines):
-                                L3 = lines[idx + 2]
-                                nxt_txt3 = L3["text"].strip()
-                                if not _is_structural(nxt_txt3):
-                                    label_text_3 = left_label_text(L3)
-                                    if label_text_3:
-                                        combined_label_3 = (combined_label_2 + " " + label_text_3).strip()
-                                        canon3 = normalize_reason(combined_label_3)
-                                        if not canon3:
-                                            # allow short-form without trailing "Restaurant"
-                                            canon3 = normalize_reason(combined_label_2)
-
-                            if canon3:
-                                canon = canon3
-                                consumed_lines = 3
-                                combined_words = list(L["words"]) + list(L2["words"]) + list(L3["words"])
-                                if debug:
-                                    debug_log["wrap_merges"] += 1
-                                    debug_log["events"].append(
-                                        f"Page {page.page_number}: 3-line wrapped label merged as '{canon}'"
-                                    )
-                            elif canon2:
-                                canon = canon2
-                                consumed_lines = 2
-                                combined_words = list(L["words"]) + list(L2["words"])
-                                if debug:
-                                    debug_log["wrap_merges"] += 1
-                                    debug_log["events"].append(
-                                        f"Page {page.page_number}: 2-line wrapped label merged as '{canon}'"
-                                    )
-
-                # No match: if this is the last line on the page, carry it to next page
                 if not canon:
                     if debug:
                         debug_log["unmatched_labels"].append({
@@ -589,18 +437,6 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes, debug: bool = False):
                             "store": current_store,
                             "section": current_section,
                         })
-                    if idx == len(lines) - 1:
-                        carryover_partial = {
-                            "ad": current_ad,
-                            "store": current_store,
-                            "section": current_section,
-                            "words": list(L["words"]),
-                            "label_text_1": label_text_1,
-                        }
-                        if debug:
-                            debug_log["events"].append(
-                                f"Page {page.page_number}: carrying partial label '{label_text_1}' to next page"
-                            )
                     idx += 1
                     continue
 
@@ -608,39 +444,46 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes, debug: bool = False):
                 sect = data[current_ad].setdefault(current_store, {}).setdefault(current_section, {})
                 per_header = sect.setdefault("__all__", defaultdict(lambda: defaultdict(int)))
 
-                for w in combined_words:
-                    token = w["text"].strip()
-                    if not re.fullmatch(r"-?\d+", token):
-                        continue
-                    if w["x0"] <= label_right_edge:
-                        continue
-                    xmid = (w["x0"] + w["x1"]) / 2
-                    mapped = map_x_to_header(header_bins, xmid)
-                    if mapped is None or mapped not in ordered_headers:
+                def consume_words(words):
+                    for w in words:
+                        token = w["text"].strip()
+                        # numeric token only
+                        if not re.fullmatch(r"-?\d+", token):
+                            continue
+                        # must be to the right of label area
+                        if w["x0"] <= label_right_edge:
+                            continue
+                        xmid = (w["x0"] + w["x1"]) / 2
+                        mapped = map_x_to_header(header_bins, xmid)
+                        if mapped is None or mapped not in ordered_headers:
+                            if debug:
+                                debug_log["ignored_tokens"].append({
+                                    "page": page.page_number,
+                                    "token": token,
+                                    "xmid": xmid,
+                                    "reason": canon,
+                                    "store": current_store,
+                                    "section": current_section,
+                                })
+                            continue
+                        per_header[canon][mapped] += int(token)
                         if debug:
-                            debug_log["ignored_tokens"].append({
+                            debug_log["token_trace"].append({
                                 "page": page.page_number,
-                                "token": token,
-                                "xmid": xmid,
-                                "reason": canon,
+                                "ad": current_ad,
                                 "store": current_store,
                                 "section": current_section,
+                                "reason": canon,
+                                "period": mapped,
+                                "value": int(token),
                             })
-                        continue
-                    per_header[canon][mapped] += int(token)
-                    if debug:
-                        debug_log["token_trace"].append({
-                            "page": page.page_number,
-                            "ad": current_ad,
-                            "store": current_store,
-                            "section": current_section,
-                            "reason": canon,
-                            "period": mapped,
-                            "value": int(token),
-                        })
 
-                # Skip however many lines we consumed building the wrapped label (1/2/3)
-                idx += consumed_lines
+                consume_words(L["words"])
+                if include_next_words:
+                    consume_words(lines[idx + 1]["words"])
+                    idx += 2  # skip the wrapped continuation line too
+                else:
+                    idx += 1
 
     return {h: header_positions[h] for h in ordered_headers}, data, ordered_headers, pairs_debug, debug_log
 
@@ -650,16 +493,11 @@ with st.spinner("Roll Tide…"):
         file_bytes, debug=debug_mode
     )
 
-# Post-parse quick notices (blue) when Debug Mode is on
 if debug_mode:
     st.info(
-        f"Debug summary — Wrap merges: {debug_log['wrap_merges']} • "
-        f"Carry merges: {debug_log['carry_merges']} • "
-        f"Unmatched labels: {len(debug_log['unmatched_labels'])} • "
+        f"Debug — Unmatched labels: {len(debug_log['unmatched_labels'])} • "
         f"Ignored tokens: {len(debug_log['ignored_tokens'])}"
     )
-    if debug_log["events"]:
-        st.info("Recent parse events:\n" + "\n".join(debug_log["events"][:6]))
 
 if not ordered_headers:
     st.error("No period headers (like ‘P9 24’) found.")
@@ -963,7 +801,7 @@ st.dataframe(style_table(reason_totals_other), use_container_width=True)
 
 # ───────────────── 6) PERIOD CHANGE SUMMARY ─────────────────
 st.header("6) Period change summary (vs previous period)")
-if not prior_label:
+if not (prior_label):
     st.info("No earlier period available to compare against.")
 else:
     def totals_by_reason_for(period_label: str, reasons: list[str], allowed_sections: set[str]) -> pd.Series:
@@ -1051,15 +889,17 @@ else:
 # ───────────────── 7) Historical context — highs/lows vs all periods ─────────────────
 st.header("7) Historical context — highs/lows vs all periods (lower = better)")
 
+def _allowed_sections_for_block(reason: str, default_sections: set[str]) -> set[str]:
+    return SPECIAL_REASON_SECTIONS.get(reason, default_sections)
+
 def build_reason_period_matrix(reasons: list[str], default_sections: set[str]) -> dict[str, dict[str, int]]:
-    """Returns: {period -> {reason -> total}} across all ADs/stores with per-reason overrides."""
     mat = {p: {r: 0 for r in reasons} for p in ordered_headers}
     for ad, stores in raw_data.items():
         for store, sections_map in stores.items():
             for sec, reason_map in sections_map.items():
                 per = reason_map.get("__all__", {})
                 for r in reasons:
-                    allowed = _allowed_sections_for_reason(r, default_sections)
+                    allowed = _allowed_sections_for_block(r, default_sections)
                     if sec not in allowed:
                         continue
                     pr = per.get(r, {})
@@ -1186,10 +1026,6 @@ if debug_mode:
             st.dataframe(pd.DataFrame(debug_log["unmatched_labels"]))
         else:
             st.success("✅ All labels matched known metrics.")
-
-    with st.expander("Wrap / Carryover Summary"):
-        st.write(f"Wrapped lines merged: {debug_log['wrap_merges']}")
-        st.write(f"Page-break carryovers merged: {debug_log['carry_merges']}")
 
     with st.expander("Ignored Tokens (outside period columns or under TOTAL)"):
         if debug_log["ignored_tokens"]:

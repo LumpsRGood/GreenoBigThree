@@ -1,14 +1,9 @@
-# Greeno Big Three v1.8.0 — Signature Matching (Tight)
-# - Keyword-based matching with *tightened* signatures (esp. compensation)
-# - Only includes next-line numbers for explicit continuations
-# - Skips any "Total:" label rows outright
-# - Quick Glance scoreboard (vs previous period; lower = better)
-# - Reason Totals (Missing/Attitude/Other) + Category Grand Totals
-# - Period Change Summary (text)
-# - Historical Context (best/worst across all periods)
-# - Single Excel export (All Sheets)
-# - Special rule: "Out of menu item" counts Dine-In + To Go + Delivery everywhere
-# - Debug panels: Unmatched labels, Ignored tokens, Token trace, Header/Bin Diagnostics
+# Greeno Big Three v1.8.1 — Safer bins + strict row banding
+# - Hard cutoff at TOTAL column (no last-bin bleed)
+# - Strict same-line token capture; next-line only for known continuations
+# - Tight "compensation" signatures
+# - Raw Layout (Audit).xlsx + Normalized Facts.xlsx exports
+# - Everything else from 1.8.0 retained
 
 import io, os, re, base64, statistics
 from collections import defaultdict
@@ -52,7 +47,7 @@ def style_table(df: pd.DataFrame, highlight_grand_total: bool = True) -> "pd.io.
     return sty
 
 # ───────────────── HEADER / THEME ─────────────────
-st.set_page_config(page_title="Greeno Big Three v1.8.0", layout="wide")
+st.set_page_config(page_title="Greeno Big Three v1.8.1", layout="wide")
 
 logo_path = "greenosu.webp"
 if os.path.exists(logo_path):
@@ -71,7 +66,7 @@ st.markdown(
 ">
   {logo_html}
   <div style="display:flex; flex-direction:column; justify-content:center;">
-      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.8.0</h1>
+      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.8.1</h1>
       <div style="height:5px; background-color:#F44336; width:300px; margin-top:10px; border-radius:3px;"></div>
   </div>
 </div>
@@ -123,37 +118,22 @@ SECTION_DELIV  = re.compile(r"^\s*Delivery\s*$", re.IGNORECASE)
 SECTION_DINEIN = re.compile(r"^\s*Dine[\s-]?In\s*$", re.IGNORECASE)
 HEADER_RX      = re.compile(r"\bP(?:1[0-2]|[1-9])\s+(?:2[0-9])\b")
 
-# Canonical reasons
 MISSING_REASONS = [
-    "Missing food",
-    "Order wrong",
-    "Missing condiments",
-    "Out of menu item",
-    "Missing bev",
-    "Missing ingredients",
-    "Packaging to-go complaint",
+    "Missing food","Order wrong","Missing condiments","Out of menu item",
+    "Missing bev","Missing ingredients","Packaging to-go complaint",
 ]
 ATTITUDE_REASONS = [
-    "Unprofessional/Unfriendly",
-    "Manager directly involved",
-    "Manager not available",
-    "Manager did not visit",
-    "Negative mgr-employee exchange",
-    "Manager did not follow up",
+    "Unprofessional/Unfriendly","Manager directly involved","Manager not available",
+    "Manager did not visit","Negative mgr-employee exchange","Manager did not follow up",
     "Argued with guest",
 ]
 OTHER_REASONS = [
-    "Long hold/no answer",
-    "No/insufficient compensation offered",
-    "Did not attempt to resolve",
-    "Guest left without ordering",
-    "Unknowledgeable",
-    "Did not open on time",
-    "No/poor apology",
+    "Long hold/no answer","No/insufficient compensation offered","Did not attempt to resolve",
+    "Guest left without ordering","Unknowledgeable","Did not open on time","No/poor apology",
 ]
 ALL_CANONICAL = MISSING_REASONS + ATTITUDE_REASONS + OTHER_REASONS
 
-# Keyword signature map (lowercased fragments → canonical) — TIGHTENED
+# Tight keyword signatures
 KEYWORD_MAP = [
     # MISSING
     ("missing item (food)",          "Missing food"),
@@ -172,7 +152,7 @@ KEYWORD_MAP = [
     ("negative manager-employee interaction", "Negative mgr-employee exchange"),
     ("manager did not follow up",    "Manager did not follow up"),
     ("argued with guest",            "Argued with guest"),
-    # OTHER (tight)
+    # OTHER
     ("long hold/no answer",              "Long hold/no answer"),
     ("no/unsatisfactory compensation",   "No/insufficient compensation offered"),
     ("compensation offered by",          "No/insufficient compensation offered"),
@@ -183,7 +163,10 @@ KEYWORD_MAP = [
     ("no/poor apology",                  "No/poor apology"),
 ]
 
-# Normalize helpers
+SPECIAL_REASON_SECTIONS = {
+    "Out of menu item": {"To Go", "Delivery", "Dine-In"}
+}
+
 def _lc(s: str) -> str:
     return re.sub(r"\s+", " ", s.lower().strip())
 
@@ -192,11 +175,6 @@ def _matches_keyword(label_text_lc: str) -> Optional[str]:
         if frag in label_text_lc:
             return canon
     return None
-
-# Special override: this Missing reason includes Dine-In too
-SPECIAL_REASON_SECTIONS = {
-    "Out of menu item": {"To Go", "Delivery", "Dine-In"}
-}
 
 def _round_to(x: float, base: int = 2) -> float:
     return round(x / base) * base
@@ -228,7 +206,6 @@ def looks_like_name(s: str) -> bool:
     return True
 
 def is_structural_total(label_text_lc: str) -> bool:
-    # ignore total rows of any section
     return (
         label_text_lc.endswith(" total:") or
         label_text_lc == "dine-in total:" or
@@ -237,7 +214,6 @@ def is_structural_total(label_text_lc: str) -> bool:
         label_text_lc == "total:"
     )
 
-# Only allow a continuation line for specific wrapped phrases
 CONTINUATION_PREFIXES = {
     "No/insufficient compensation offered": ("compensation offered", "restaurant"),
 }
@@ -301,7 +277,8 @@ def build_header_bins(header_positions: Dict[str, float], total_x: Optional[floa
         if i < len(xs) - 1:
             right = (x + xs[i+1])/2
         else:
-            right = (x + total_x)/2 if total_x is not None else x + 0.5*med_gap
+            # last bin: if total_x known, clamp before TOTAL; else conservative width
+            right = (x + total_x)/2 if total_x is not None else x + 0.6*med_gap
         bins.append((h, left, right))
     return bins
 
@@ -343,7 +320,7 @@ def find_ad_for_store(lines: List[dict], store_idx: int, left_margin: float, bac
             return s
     return None
 
-# ───────────────── PARSER (Signature Matching, Tight) ─────────────────
+# ───────────────── PARSER ─────────────────
 def parse_pdf_build_ad_store_period_map(file_bytes: bytes, debug: bool = False):
     header_positions: Dict[str, float] = {}
     ordered_headers: List[str] = []
@@ -359,6 +336,8 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes, debug: bool = False):
         "token_trace": [],
         "events": [],
         "header_bins": [],
+        "raw_layout": [],       # for Raw Layout export
+        "facts": [],            # normalized facts rows
     }
 
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
@@ -368,17 +347,21 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes, debug: bool = False):
             headers = find_period_headers(page) or carry_headers
             if not headers:
                 continue
-            carry_headers = headers[:]
+            # If current page has headers, refresh both headers and total_x from this page
+            if find_period_headers(page):
+                carry_headers = headers[:]
+                carry_total_x = None  # force re-find TOTAL on header pages
             for htxt, xc, _ in headers:
                 header_positions[htxt] = xc
             ordered_headers = sort_headers(list(header_positions.keys()))
             header_y = min(h[2] for h in headers)
 
             total_x = find_total_header_x(page, header_y) or carry_total_x
-            carry_total_x = total_x
+            if total_x is not None:
+                carry_total_x = total_x
             header_bins = build_header_bins({h: header_positions[h] for h in ordered_headers}, total_x)
 
-            # Debug: record header/bin diagnostics
+            # Debug: header/bin diagnostics
             if debug:
                 debug_log["header_bins"].append({
                     "page": page.page_number,
@@ -389,7 +372,6 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes, debug: bool = False):
                 })
 
             first_period_x = min(header_positions[h] for h in ordered_headers)
-            # be slightly permissive to avoid clipping left label fragments
             label_right_edge = first_period_x - 10
 
             lines = extract_words_grouped(page)
@@ -408,10 +390,82 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes, debug: bool = False):
                     if w["x1"] <= label_right_edge and w["text"].strip()
                 ).strip()
 
+            # Helper: capture only tokens on the SAME y-band; hard-stop at TOTAL
+            def consume_words(line_obj, canon_reason: str):
+                y_band = line_obj["y"]
+                for w in line_obj["words"]:
+                    token = w["text"].strip()
+                    if not re.fullmatch(r"-?\d+", token):
+                        continue
+                    if w["x0"] <= label_right_edge:
+                        continue
+                    # strict row banding
+                    w_y_mid = _round_to((w["top"] + w["bottom"]) / 2, 2)
+                    if abs(w_y_mid - y_band) > 0.01:  # they are already grouped; keep it strict
+                        continue
+                    xmid = (w["x0"] + w["x1"]) / 2
+                    # hard cutoff at TOTAL column, if present
+                    if total_x is not None and xmid >= (total_x - 1.0):
+                        if debug:
+                            debug_log["ignored_tokens"].append({
+                                "page": page.page_number,
+                                "token": token,
+                                "xmid": xmid,
+                                "reason": f"{canon_reason} (>= TOTAL cutoff)",
+                                "store": current_store,
+                                "section": current_section,
+                            })
+                        continue
+                    mapped = map_x_to_header(header_bins, xmid)
+                    if mapped is None or mapped not in ordered_headers:
+                        if debug:
+                            debug_log["ignored_tokens"].append({
+                                "page": page.page_number,
+                                "token": token,
+                                "xmid": xmid,
+                                "reason": f"{canon_reason} (no header bin)",
+                                "store": current_store,
+                                "section": current_section,
+                            })
+                        continue
+                    sect = data[current_ad].setdefault(current_store, {}).setdefault(current_section, {})
+                    per_header = sect.setdefault("__all__", defaultdict(lambda: defaultdict(int)))
+                    per_header[canon_reason][mapped] += int(token)
+
+                    if debug:
+                        debug_log["token_trace"].append({
+                            "page": page.page_number,
+                            "ad": current_ad,
+                            "store": current_store,
+                            "section": current_section,
+                            "reason": canon_reason,
+                            "period": mapped,
+                            "value": int(token),
+                        })
+                        debug_log["facts"].append({
+                            "Area Director": current_ad, "Store": current_store, "Section": current_section,
+                            "Reason": canon_reason, "Period": mapped, "Value": int(token),
+                        })
+
             idx = 0
             while idx < len(lines):
                 L = lines[idx]
                 txt = L["text"].strip()
+
+                # Dump raw layout for audit (debug-only export)
+                if debug:
+                    for w in L["words"]:
+                        debug_log["raw_layout"].append({
+                            "page": page.page_number,
+                            "y": L["y"],
+                            "x0": w["x0"],
+                            "x1": w["x1"],
+                            "xmid": (w["x0"] + w["x1"]) / 2,
+                            "text": w["text"],
+                            "ad": current_ad,
+                            "store": current_store,
+                            "section": current_section,
+                        })
 
                 # Store detection
                 if STORE_LINE_RX.match(txt):
@@ -441,26 +495,26 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes, debug: bool = False):
                     idx += 1
                     continue
 
-                # Left label on this line
+                # Left label for this line
                 label_text_1 = left_label_text(L)
                 label_text_1_lc = _lc(label_text_1)
 
-                # Skip any totals outright
+                # Skip totals outright
                 if is_structural_total(label_text_1_lc):
                     idx += 1
                     continue
 
-                # Signature matching on THIS line
+                # Signature match
                 canon = _matches_keyword(label_text_1_lc)
 
-                # Consider numeric tokens from the NEXT line *only* for explicit continuations
-                include_next_words = False
+                # Next-line continuation only for known wraps
+                include_next = False
                 if canon and (idx + 1) < len(lines):
                     L2 = lines[idx + 1]
                     left_label_2 = left_label_text(L2)
                     left_label_2_lc = _lc(left_label_2)
                     cont_prefixes = CONTINUATION_PREFIXES.get(canon, ())
-                    include_next_words = any(left_label_2_lc.startswith(p) for p in cont_prefixes)
+                    include_next = any(left_label_2_lc.startswith(p) for p in cont_prefixes)
 
                 if not canon:
                     if debug:
@@ -474,48 +528,11 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes, debug: bool = False):
                     idx += 1
                     continue
 
-                # Record numbers under period columns
-                sect = data[current_ad].setdefault(current_store, {}).setdefault(current_section, {})
-                per_header = sect.setdefault("__all__", defaultdict(lambda: defaultdict(int)))
-
-                def consume_words(words):
-                    for w in words:
-                        token = w["text"].strip()
-                        # numeric only
-                        if not re.fullmatch(r"-?\d+", token):
-                            continue
-                        # must be to the right of label area
-                        if w["x0"] <= label_right_edge:
-                            continue
-                        xmid = (w["x0"] + w["x1"]) / 2
-                        mapped = map_x_to_header(header_bins, xmid)
-                        if mapped is None or mapped not in ordered_headers:
-                            if debug:
-                                debug_log["ignored_tokens"].append({
-                                    "page": page.page_number,
-                                    "token": token,
-                                    "xmid": xmid,
-                                    "reason": canon,
-                                    "store": current_store,
-                                    "section": current_section,
-                                })
-                            continue
-                        per_header[canon][mapped] += int(token)
-                        if debug:
-                            debug_log["token_trace"].append({
-                                "page": page.page_number,
-                                "ad": current_ad,
-                                "store": current_store,
-                                "section": current_section,
-                                "reason": canon,
-                                "period": mapped,
-                                "value": int(token),
-                            })
-
-                consume_words(L["words"])
-                if include_next_words:
-                    consume_words(lines[idx + 1]["words"])
-                    idx += 2  # consume the continuation line
+                # Consume numbers on this exact line (strict band)
+                consume_words(L, canon)
+                if include_next:
+                    consume_words(lines[idx + 1], canon)
+                    idx += 2
                 else:
                     idx += 1
 
@@ -534,14 +551,14 @@ if debug_mode:
     )
 
 if not ordered_headers:
-    st.error("No period headers (like ‘P9 24’) found.")
+    st.error("No period headers (like ‘P9 25’) found.")
     st.stop()
 
 # ───────────────── PERIOD PICKER ─────────────────
 st.header("2) Pick the period")
 sel_col = st.selectbox("Period", options=ordered_headers, index=len(ordered_headers)-1)
 
-# ───────────────── AGG HELPERS (with Out-of-menu override) ─────────────────
+# ───────────────── AGG HELPERS ─────────────────
 def _allowed_sections_for_reason(reason: str, default_sections: set[str]) -> set[str]:
     return SPECIAL_REASON_SECTIONS.get(reason, default_sections)
 
@@ -678,16 +695,16 @@ for ad, stores in raw_data.items():
                 continue
             all_per_header = reason_map.get("__all__", {})
             for canon in ALL_CANONICAL:
-                v = int(all_per_header.get(canon, {}).get(sel_col, 0))
-                rows.append({
-                    "Area Director": ad,
-                    "Store": store,
-                    "Section": section,
-                    "Reason": canon,
-                    "Value": v,
-                })
+                vdict = all_per_header.get(canon, {})
+                for period, val in vdict.items():
+                    rows.append({
+                        "Area Director": ad, "Store": store, "Section": section,
+                        "Reason": canon, "Period": period, "Value": int(val),
+                    })
 
-df = pd.DataFrame(rows)
+df_all = pd.DataFrame(rows)
+df = df_all[df_all["Period"] == sel_col].copy()
+
 if df.empty:
     st.warning("No matching reasons found for the selected period.")
     st.stop()
@@ -718,7 +735,7 @@ df["Category"] = df["Reason"].map(CATEGORY_MAP).fillna("Unassigned")
 st.header("4) Reason totals — To-go Missing Complaints (selected period)")
 st.caption("To-Go and Delivery columns shown; Total for “Out of menu item” includes Dine-In as well.")
 
-missing_df = df[df["Reason"].isin(MISSING_REASONS) & df["Section"].isin({"To Go","Delivery","Dine-In"})]
+missing_df = df_all[(df_all["Reason"].isin(MISSING_REASONS)) & (df_all["Period"] == sel_col)]
 
 def _order_series_missing(s: pd.Series) -> pd.Series:
     return s.reindex(MISSING_REASONS)
@@ -736,10 +753,8 @@ tot_dinein = (
       .groupby("Reason", as_index=True)["Value"].sum()
 )
 
-# Base Total = To Go + Delivery
 total_series = tot_togo.add(tot_delivery, fill_value=0)
 
-# Add Dine-In ONLY for “Out of menu item”
 if "Out of menu item" in set(total_series.index).union(set(tot_dinein.index)):
     total_series.loc["Out of menu item"] = (
         float(total_series.get("Out of menu item", 0)) + float(tot_dinein.get("Out of menu item", 0))
@@ -761,26 +776,15 @@ st.dataframe(style_table(reason_totals_missing), use_container_width=True)
 st.header("4b) Reason totals — Attitude (selected period)")
 st.caption("All segments (Dine-In, To Go, Delivery).")
 
-att_df = df[df["Reason"].isin(ATTITUDE_REASONS)]
+att_df = df_all[(df_all["Reason"].isin(ATTITUDE_REASONS)) & (df_all["Period"] == sel_col)]
 
 def _order_series_att(s: pd.Series) -> pd.Series:
     return s.reindex(ATTITUDE_REASONS)
 
-att_dinein = (
-    att_df[att_df["Section"] == "Dine-In"]
-      .groupby("Reason", as_index=True)["Value"].sum().astype(int)
-)
-att_togo = (
-    att_df[att_df["Section"] == "To Go"]
-      .groupby("Reason", as_index=True)["Value"].sum().astype(int)
-)
-att_delivery = (
-    att_df[att_df["Section"] == "Delivery"]
-      .groupby("Reason", as_index=True)["Value"].sum().astype(int)
-)
-att_total = (
-    att_df.groupby("Reason", as_index=True)["Value"].sum().astype(int)
-)
+att_dinein = att_df[att_df["Section"] == "Dine-In"].groupby("Reason", as_index=True)["Value"].sum().astype(int)
+att_togo = att_df[att_df["Section"] == "To Go"].groupby("Reason", as_index=True)["Value"].sum().astype(int)
+att_delivery = att_df[att_df["Section"] == "Delivery"].groupby("Reason", as_index=True)["Value"].sum().astype(int)
+att_total = att_df.groupby("Reason", as_index=True)["Value"].sum().astype(int)
 
 reason_totals_attitude = pd.DataFrame({
     "Dine-In": _order_series_att(att_dinein),
@@ -799,26 +803,15 @@ st.dataframe(style_table(reason_totals_attitude), use_container_width=True)
 st.header("4c) Reason totals — Other (selected period)")
 st.caption("All segments (Dine-In, To Go, Delivery).")
 
-oth_df = df[df["Reason"].isin(OTHER_REASONS)]
+oth_df = df_all[(df_all["Reason"].isin(OTHER_REASONS)) & (df_all["Period"] == sel_col)]
 
 def _order_series_other(s: pd.Series) -> pd.Series:
     return s.reindex(OTHER_REASONS)
 
-oth_dinein = (
-    oth_df[oth_df["Section"] == "Dine-In"]
-      .groupby("Reason", as_index=True)["Value"].sum().astype(int)
-)
-oth_togo = (
-    oth_df[oth_df["Section"] == "To Go"]
-      .groupby("Reason", as_index=True)["Value"].sum().astype(int)
-)
-oth_delivery = (
-    oth_df[oth_df["Section"] == "Delivery"]
-      .groupby("Reason", as_index=True)["Value"].sum().astype(int)
-)
-oth_total = (
-    oth_df.groupby("Reason", as_index=True)["Value"].sum().astype(int)
-)
+oth_dinein = oth_df[oth_df["Section"] == "Dine-In"].groupby("Reason", as_index=True)["Value"].sum().astype(int)
+oth_togo = oth_df[oth_df["Section"] == "To Go"].groupby("Reason", as_index=True)["Value"].sum().astype(int)
+oth_delivery = oth_df[oth_df["Section"] == "Delivery"].groupby("Reason", as_index=True)["Value"].sum().astype(int)
+oth_total = oth_df.groupby("Reason", as_index=True)["Value"].sum().astype(int)
 
 reason_totals_other = pd.DataFrame({
     "Dine-In": _order_series_other(oth_dinein),
@@ -833,7 +826,7 @@ st.metric("Category Grand Total — Other", cat_grand_total_other)
 reason_totals_other.loc["— Grand Total —"] = reason_totals_other.sum(numeric_only=True)
 st.dataframe(style_table(reason_totals_other), use_container_width=True)
 
-# ───────────────── 6) PERIOD CHANGE SUMMARY ─────────────────
+# ───────────────── 6) Period change summary ─────────────────
 st.header("6) Period change summary (vs previous period)")
 if not (prior_label):
     st.info("No earlier period available to compare against.")
@@ -920,7 +913,7 @@ else:
         mime="text/plain",
     )
 
-# ───────────────── 7) Historical context — highs/lows vs all periods ─────────────────
+# ───────────────── 7) Historical context ─────────────────
 st.header("7) Historical context — highs/lows vs all periods (lower = better)")
 
 def build_reason_period_matrix(reasons: list[str], default_sections: set[str]) -> dict[str, dict[str, int]]:
@@ -949,8 +942,8 @@ def build_highlow_tables(reasons: list[str], allowed_sections: set[str], title: 
     worst_vals = {}
     for r in reasons:
         series = [(p, mat[p][r]) for p in ordered_headers]
-        best_period, best_val = min(series, key=lambda kv: kv[1])   # lowest = best
-        worst_period, worst_val = max(series, key=lambda kv: kv[1]) # highest = worst
+        best_period, best_val = min(series, key=lambda kv: kv[1])
+        worst_period, worst_val = max(series, key=lambda kv: kv[1])
         best_vals[r] = best_val
         worst_vals[r] = worst_val
         sorted_asc = sorted(series, key=lambda kv: kv[1])
@@ -981,7 +974,7 @@ def build_highlow_tables(reasons: list[str], allowed_sections: set[str], title: 
     best_p, best_total   = min(totals_by_period.items(), key=lambda kv: kv[1])
     worst_p, worst_total = max(totals_by_period.items(), key=lambda kv: kv[1])
     current_total = totals_by_period.get(sel_col, 0)
-    rank_list = sorted(totals_by_period.items(), key=lambda kv: kv[1])  # ascending
+    rank_list = sorted(totals_by_period.items(), key=lambda kv: kv[1])
     current_rank_idx = next(i + 1 for i, (p, v) in enumerate(rank_list) if p == sel_col)
 
     current_cls = " best" if current_total == best_total else (" worst" if current_total == worst_total else "")
@@ -1030,13 +1023,15 @@ build_highlow_tables(MISSING_REASONS, {"To Go","Delivery"}, "7a) To-go Missing C
 build_highlow_tables(ATTITUDE_REASONS, {"Dine-In","To Go","Delivery"}, "7b) Attitude (All segments) — highs/lows")
 build_highlow_tables(OTHER_REASONS, {"Dine-In","To Go","Delivery"}, "7c) Other (All segments) — highs/lows")
 
-# ───────────────── 8) EXPORT — Excel (All Sheets) ─────────────────
+# ───────────────── 8) EXPORT — Excel (All Sheets + QA) ─────────────────
 st.header("8) Export results")
+
+# Normal workbook (All Sheets)
 buff = io.BytesIO()
 with pd.ExcelWriter(buff, engine="openpyxl") as writer:
-    df_detail.to_excel(writer, index=False, sheet_name="Detail")
-    ad_totals.to_excel(writer, index=False, sheet_name="AD Totals")
-    store_totals.to_excel(writer, index=False, sheet_name="Store Totals")
+    df_detail.to_excel(writer, index=False, sheet_name="Detail (Selected Period)")
+    ad_totals.to_excel(writer, index=False, sheet_name="AD Totals (Selected)")
+    store_totals.to_excel(writer, index=False, sheet_name="Store Totals (Selected)")
     reason_totals_missing.to_excel(writer, sheet_name="Reason Totals (Missing)")
     reason_totals_attitude.to_excel(writer, sheet_name="Reason Totals (Attitude)")
     reason_totals_other.to_excel(writer, sheet_name="Reason Totals (Other)")
@@ -1045,6 +1040,24 @@ st.download_button(
     "📥 Download Excel (All Sheets)",
     data=buff.getvalue(),
     file_name=f"ad_store_{sel_col.replace(' ','_')}.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
+
+# QA Exports (Raw Layout + Normalized Facts)
+qa = io.BytesIO()
+with pd.ExcelWriter(qa, engine="openpyxl") as writer:
+    if debug_mode and debug_log.get("raw_layout"):
+        pd.DataFrame(debug_log["raw_layout"]).to_excel(writer, index=False, sheet_name="Raw Layout (Audit)")
+    # full normalized facts (all periods) — always useful
+    facts_df = pd.DataFrame(debug_log["facts"]) if debug_log.get("facts") else df_all[
+        ["Area Director","Store","Section","Reason","Period","Value"]
+    ]
+    facts_df.to_excel(writer, index=False, sheet_name="Normalized Facts")
+
+st.download_button(
+    "📥 Download QA Workbook (Audit + Facts)",
+    data=qa.getvalue(),
+    file_name=f"qa_{sel_col.replace(' ','_')}.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
 
@@ -1058,7 +1071,7 @@ if debug_mode:
         else:
             st.success("✅ All labels matched known metrics.")
 
-    with st.expander("Ignored Tokens (outside period columns or under TOTAL)"):
+    with st.expander("Ignored Tokens (outside period columns or ≥ TOTAL)"):
         if debug_log["ignored_tokens"]:
             st.dataframe(pd.DataFrame(debug_log["ignored_tokens"]))
         else:

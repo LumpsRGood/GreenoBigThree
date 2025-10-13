@@ -1,10 +1,12 @@
-# Greeno Big Three v1.7.4 — streamlined display
-# - Quick Glance scoreboard (vs previous period; lower = better) with dynamic borders
-# - Reason Totals (Missing/Attitude/Other) + Category Grand Total metrics
+# Greeno Big Three v1.7.5 — streamlined display + wrapped-label fix
+# - Quick Glance (vs previous period; lower = better)
+# - Reason Totals (Missing/Attitude/Other) + Category Grand Totals
 # - Period Change Summary (text)
-# - Historical Context (KPI cards + high/low tables)
+# - Historical Context (best/worst across all periods)
 # - Single Excel export (All Sheets)
 # - Special rule: "Out of menu item" counts Dine-In + To Go + Delivery everywhere
+# - Parser fix: detect & merge two-line wrapped reason labels
+
 import io, os, re, base64, statistics
 from collections import defaultdict
 from typing import Dict, List, Tuple, Optional
@@ -47,7 +49,7 @@ def style_table(df: pd.DataFrame, highlight_grand_total: bool = True) -> "pd.io.
     return sty
 
 # ───────────────── HEADER / THEME ─────────────────
-st.set_page_config(page_title="Greeno Big Three v1.7.4", layout="wide")
+st.set_page_config(page_title="Greeno Big Three v1.7.5", layout="wide")
 
 logo_path = "greenosu.webp"
 if os.path.exists(logo_path):
@@ -66,7 +68,7 @@ st.markdown(
 ">
   {logo_html}
   <div style="display:flex; flex-direction:column; justify-content:center;">
-      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.7.4</h1>
+      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.7.5</h1>
       <div style="height:5px; background-color:#F44336; width:300px; margin-top:10px; border-radius:3px;"></div>
   </div>
 </div>
@@ -364,9 +366,13 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes):
             current_store: Optional[str] = None
             current_section: Optional[str] = None
 
-            for idx, L in enumerate(lines):
+            # ────── MAIN PARSING LOOP (wrapped label aware) ──────
+            idx = 0
+            while idx < len(lines):
+                L = lines[idx]
                 txt = L["text"].strip()
 
+                # Store detection
                 if STORE_LINE_RX.match(txt):
                     ad_for_this_store = find_ad_for_store(lines, idx, left_margin)
                     if ad_for_this_store:
@@ -375,30 +381,66 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes):
                     current_section = None
                     if current_ad:
                         pairs_debug.append((current_ad, current_store))
+                    idx += 1
                     continue
 
+                # Section markers
                 if SECTION_TOGO.match(txt):
-                    current_section = "To Go";   continue
+                    current_section = "To Go";   idx += 1; continue
                 if SECTION_DELIV.match(txt):
-                    current_section = "Delivery"; continue
+                    current_section = "Delivery"; idx += 1; continue
                 if SECTION_DINEIN.match(txt):
-                    current_section = "Dine-In";  continue
+                    current_section = "Dine-In";  idx += 1; continue
 
+                # Skip headings or missing context
                 if txt in HEADINGS:
+                    idx += 1
                     continue
-                if not (current_ad and current_store and current_section in {"To Go","Delivery","Dine-In"}):
+                if not (current_ad and current_store and current_section in {"To Go", "Delivery", "Dine-In"}):
+                    idx += 1
                     continue
 
-                # LEFT LABEL ONLY (strict)
-                label_tokens = [w["text"].strip() for w in L["words"] if w["x1"] <= label_right_edge]
-                label_text = " ".join(t for t in label_tokens if t)
-                canon = normalize_reason(label_text)
+                # Helper: text to left of the first column boundary
+                def left_label_text(line):
+                    return " ".join(
+                        w["text"].strip()
+                        for w in line["words"]
+                        if w["x1"] <= label_right_edge and w["text"].strip()
+                    ).strip()
+
+                # Step 1: try single-line label
+                label_text_1 = left_label_text(L)
+                canon = normalize_reason(label_text_1)
+
+                # Step 2: if no match, check for a wrapped label (current + next line)
+                use_two_lines = False
+                combined_words = list(L["words"])
+                if not canon and (idx + 1) < len(lines):
+                    L2 = lines[idx + 1]
+                    nxt_txt = L2["text"].strip()
+                    if (not STORE_LINE_RX.match(nxt_txt)
+                        and nxt_txt not in HEADINGS
+                        and not SECTION_TOGO.match(nxt_txt)
+                        and not SECTION_DELIV.match(nxt_txt)
+                        and not SECTION_DINEIN.match(nxt_txt)):
+                        label_text_2 = left_label_text(L2)
+                        if label_text_2:
+                            combined_label = (label_text_1 + " " + label_text_2).strip()
+                            canon2 = normalize_reason(combined_label)
+                            if canon2:
+                                canon = canon2
+                                use_two_lines = True
+                                combined_words = list(L["words"]) + list(L2["words"])
+
                 if not canon:
+                    idx += 1
                     continue
 
+                # Record numbers under period columns
                 sect = data[current_ad].setdefault(current_store, {}).setdefault(current_section, {})
                 per_header = sect.setdefault("__all__", defaultdict(lambda: defaultdict(int)))
-                for w in L["words"]:
+
+                for w in combined_words:
                     token = w["text"].strip()
                     if not re.fullmatch(r"-?\d+", token):
                         continue
@@ -406,10 +448,12 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes):
                         continue
                     xmid = (w["x0"] + w["x1"]) / 2
                     mapped = map_x_to_header(header_bins, xmid)
-                    if mapped is None:
+                    if mapped is None or mapped not in ordered_headers:
                         continue
-                    if mapped in ordered_headers:
-                        per_header[canon][mapped] += int(token)
+                    per_header[canon][mapped] += int(token)
+
+                # If we consumed two lines for a wrapped label, skip the next line
+                idx += 2 if use_two_lines else 1
 
     return {h: header_positions[h] for h in ordered_headers}, data, ordered_headers, pairs_debug
 

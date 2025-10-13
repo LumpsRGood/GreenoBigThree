@@ -1,4 +1,4 @@
-# Greeno Big Three v1.7.6 — streamlined UI + wrapped-label + page-break carryover
+# Greeno Big Three v1.7.7 — streamlined UI + wrapped labels + page-break carryover + DEBUG MODE
 # - Quick Glance (vs previous period; lower = better)
 # - Reason Totals (Missing/Attitude/Other) + Category Grand Totals
 # - Period Change Summary (text)
@@ -8,6 +8,12 @@
 # - Parser fixes:
 #     * detect & merge two-line wrapped reason labels (same page)
 #     * carry partial labels across a page break and merge on next page
+# - DEBUG MODE adds:
+#     * unmatched labels panel
+#     * wrap/carryover counters
+#     * ignored tokens panel (out of bins / under TOTAL)
+#     * token trace panel (filter by reason & period)
+#     * post-parse blue notices with quick counts
 
 import io, os, re, base64, statistics
 from collections import defaultdict
@@ -51,7 +57,7 @@ def style_table(df: pd.DataFrame, highlight_grand_total: bool = True) -> "pd.io.
     return sty
 
 # ───────────────── HEADER / THEME ─────────────────
-st.set_page_config(page_title="Greeno Big Three v1.7.6", layout="wide")
+st.set_page_config(page_title="Greeno Big Three v1.7.7", layout="wide")
 
 logo_path = "greenosu.webp"
 if os.path.exists(logo_path):
@@ -70,7 +76,7 @@ st.markdown(
 ">
   {logo_html}
   <div style="display:flex; flex-direction:column; justify-content:center;">
-      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.7.6</h1>
+      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.7.7</h1>
       <div style="height:5px; background-color:#F44336; width:300px; margin-top:10px; border-radius:3px;"></div>
   </div>
 </div>
@@ -83,6 +89,7 @@ with st.sidebar:
     st.header("1) Upload PDF")
     up = st.file_uploader("Choose the PDF report", type=["pdf"])
     st.caption("Missing = To-Go/Delivery (except ‘Out of menu item’ includes Dine-In). Attitude/Other = all segments.")
+    debug_mode = st.checkbox("🔍 Enable Debug Mode", value=False)
 
 if not up:
     st.markdown(
@@ -121,7 +128,7 @@ SECTION_DELIV  = re.compile(r"^\s*Delivery\s*$", re.IGNORECASE)
 SECTION_DINEIN = re.compile(r"^\s*Dine[\s-]?In\s*$", re.IGNORECASE)
 HEADER_RX      = re.compile(r"\bP(?:1[0-2]|[1-9])\s+(?:2[0-9])\b")
 
-# Canonical reasons — To-go Missing Complaints (7)
+# Canonical reasons
 MISSING_REASONS = [
     "Missing food",
     "Order wrong",
@@ -131,8 +138,6 @@ MISSING_REASONS = [
     "Missing ingredients",
     "Packaging to-go complaint",
 ]
-
-# Canonical reasons — Attitude (7)
 ATTITUDE_REASONS = [
     "Unprofessional/Unfriendly",
     "Manager directly involved",
@@ -142,8 +147,6 @@ ATTITUDE_REASONS = [
     "Manager did not follow up",
     "Argued with guest",
 ]
-
-# Canonical reasons — Other (7)
 OTHER_REASONS = [
     "Long hold/no answer",
     "No/insufficient compensation offered",
@@ -153,7 +156,6 @@ OTHER_REASONS = [
     "Did not open on time",
     "No/poor apology",
 ]
-
 ALL_CANONICAL = MISSING_REASONS + ATTITUDE_REASONS + OTHER_REASONS
 
 # Aliases from PDF → canonical
@@ -329,7 +331,7 @@ def find_ad_for_store(lines: List[dict], store_idx: int, left_margin: float, bac
     return None
 
 # ───────────────── PARSER ─────────────────
-def parse_pdf_build_ad_store_period_map(file_bytes: bytes):
+def parse_pdf_build_ad_store_period_map(file_bytes: bytes, debug: bool = False):
     header_positions: Dict[str, float] = {}
     ordered_headers: List[str] = []
     pairs_debug: List[Tuple[str, str]] = []
@@ -337,6 +339,16 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes):
     data: Dict[str, Dict[str, Dict[str, Dict[str, Dict[str, int]]]]] = defaultdict(
         lambda: defaultdict(lambda: defaultdict(dict))
     )
+
+    # Debug tracking containers
+    debug_log = {
+        "unmatched_labels": [],
+        "wrap_merges": 0,
+        "carry_merges": 0,
+        "ignored_tokens": [],
+        "token_trace": [],
+        "events": [],  # short messages you can surface after parse
+    }
 
     carryover_partial = None  # holds a partial label that broke at a page end
 
@@ -370,7 +382,7 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes):
             current_store: Optional[str] = None
             current_section: Optional[str] = None
 
-            # Helper for label text (left of first column)
+            # helper for label text (left of first column)
             def left_label_text(line):
                 return " ".join(
                     w["text"].strip()
@@ -380,7 +392,6 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes):
 
             # If we have a carryover from last page, try to merge with first usable line(s)
             if carryover_partial:
-                consumed = False
                 look_ahead_limit = min(3, len(lines))
                 for k in range(look_ahead_limit):
                     L0 = lines[k]
@@ -412,11 +423,32 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes):
                             xmid = (w["x0"] + w["x1"]) / 2
                             mapped = map_x_to_header(header_bins, xmid)
                             if mapped is None or mapped not in ordered_headers:
+                                if debug:
+                                    debug_log["ignored_tokens"].append({
+                                        "page": page.page_number,
+                                        "token": token,
+                                        "xmid": xmid,
+                                        "reason": canon2,
+                                        "store": carryover_partial["store"],
+                                        "section": carryover_partial["section"],
+                                    })
                                 continue
                             per_header[canon2][mapped] += int(token)
+                            if debug:
+                                debug_log["token_trace"].append({
+                                    "page": page.page_number,
+                                    "ad": carryover_partial["ad"],
+                                    "store": carryover_partial["store"],
+                                    "section": carryover_partial["section"],
+                                    "reason": canon2,
+                                    "period": mapped,
+                                    "value": int(token),
+                                })
 
                         lines.pop(k)  # consume continuation line
-                        consumed = True
+                        if debug:
+                            debug_log["carry_merges"] += 1
+                            debug_log["events"].append(f"Page {page.page_number}: carried label merged as '{canon2}'")
                         break
                 carryover_partial = None  # clear once attempted
 
@@ -477,9 +509,22 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes):
                                 canon = canon2
                                 use_two_lines = True
                                 combined_words = list(L["words"]) + list(L2["words"])
+                                if debug:
+                                    debug_log["wrap_merges"] += 1
+                                    debug_log["events"].append(
+                                        f"Page {page.page_number}: wrapped label merged as '{canon}'"
+                                    )
 
                 # No match: if this is the last line on the page, carry it to next page
                 if not canon:
+                    if debug:
+                        debug_log["unmatched_labels"].append({
+                            "page": page.page_number,
+                            "text": label_text_1,
+                            "ad": current_ad,
+                            "store": current_store,
+                            "section": current_section,
+                        })
                     if idx == len(lines) - 1:
                         carryover_partial = {
                             "ad": current_ad,
@@ -488,6 +533,10 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes):
                             "words": list(L["words"]),
                             "label_text_1": label_text_1,
                         }
+                        if debug:
+                            debug_log["events"].append(
+                                f"Page {page.page_number}: carrying partial label '{label_text_1}' to next page"
+                            )
                     idx += 1
                     continue
 
@@ -504,17 +553,49 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes):
                     xmid = (w["x0"] + w["x1"]) / 2
                     mapped = map_x_to_header(header_bins, xmid)
                     if mapped is None or mapped not in ordered_headers:
+                        if debug:
+                            debug_log["ignored_tokens"].append({
+                                "page": page.page_number,
+                                "token": token,
+                                "xmid": xmid,
+                                "reason": canon,
+                                "store": current_store,
+                                "section": current_section,
+                            })
                         continue
                     per_header[canon][mapped] += int(token)
+                    if debug:
+                        debug_log["token_trace"].append({
+                            "page": page.page_number,
+                            "ad": current_ad,
+                            "store": current_store,
+                            "section": current_section,
+                            "reason": canon,
+                            "period": mapped,
+                            "value": int(token),
+                        })
 
                 # If we consumed two lines for a wrapped label, skip the next line
                 idx += 2 if use_two_lines else 1
 
-    return {h: header_positions[h] for h in ordered_headers}, data, ordered_headers, pairs_debug
+    return {h: header_positions[h] for h in ordered_headers}, data, ordered_headers, pairs_debug, debug_log
 
 # ───────────────── RUN ─────────────────
 with st.spinner("Roll Tide…"):
-    header_x_map, raw_data, ordered_headers, pairs_debug = parse_pdf_build_ad_store_period_map(file_bytes)
+    header_x_map, raw_data, ordered_headers, pairs_debug, debug_log = parse_pdf_build_ad_store_period_map(
+        file_bytes, debug=debug_mode
+    )
+
+# Post-parse quick notices (blue) when Debug Mode is on
+if debug_mode:
+    st.info(
+        f"Debug summary — Wrap merges: {debug_log['wrap_merges']} • "
+        f"Carry merges: {debug_log['carry_merges']} • "
+        f"Unmatched labels: {len(debug_log['unmatched_labels'])} • "
+        f"Ignored tokens: {len(debug_log['ignored_tokens'])}"
+    )
+    if debug_log["events"]:
+        st.info("Recent parse events:\n" + "\n".join(debug_log["events"][:6]))
 
 if not ordered_headers:
     st.error("No period headers (like ‘P9 24’) found.")
@@ -1031,3 +1112,33 @@ st.download_button(
     file_name=f"ad_store_{sel_col.replace(' ','_')}.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
+
+# ───────────────── DEBUG PANEL ─────────────────
+if debug_mode:
+    st.header("🧠 Troubleshooting / Debug Output")
+
+    with st.expander("Unmatched Labels (not recognized)"):
+        if debug_log["unmatched_labels"]:
+            st.dataframe(pd.DataFrame(debug_log["unmatched_labels"]))
+        else:
+            st.success("✅ All labels matched known metrics.")
+
+    with st.expander("Wrap / Carryover Summary"):
+        st.write(f"Wrapped lines merged: {debug_log['wrap_merges']}")
+        st.write(f"Page-break carryovers merged: {debug_log['carry_merges']}")
+
+    with st.expander("Ignored Tokens (outside period columns or under TOTAL)"):
+        if debug_log["ignored_tokens"]:
+            st.dataframe(pd.DataFrame(debug_log["ignored_tokens"]))
+        else:
+            st.success("✅ No tokens were ignored for being out of range.")
+
+    with st.expander("Token Trace (raw matches)"):
+        trace_df = pd.DataFrame(debug_log["token_trace"])
+        if trace_df.empty:
+            st.info("No tokens traced yet.")
+        else:
+            col_reason = st.selectbox("Filter by reason:", sorted(trace_df["reason"].unique()))
+            col_period = st.selectbox("Filter by period:", sorted(trace_df["period"].unique()))
+            filtered = trace_df[(trace_df["reason"] == col_reason) & (trace_df["period"] == col_period)]
+            st.dataframe(filtered)

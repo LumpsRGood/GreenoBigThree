@@ -1,11 +1,13 @@
-# Greeno Big Three v1.7.5 — streamlined display + wrapped-label fix
+# Greeno Big Three v1.7.6 — streamlined UI + wrapped-label + page-break carryover
 # - Quick Glance (vs previous period; lower = better)
 # - Reason Totals (Missing/Attitude/Other) + Category Grand Totals
 # - Period Change Summary (text)
 # - Historical Context (best/worst across all periods)
 # - Single Excel export (All Sheets)
 # - Special rule: "Out of menu item" counts Dine-In + To Go + Delivery everywhere
-# - Parser fix: detect & merge two-line wrapped reason labels
+# - Parser fixes:
+#     * detect & merge two-line wrapped reason labels (same page)
+#     * carry partial labels across a page break and merge on next page
 
 import io, os, re, base64, statistics
 from collections import defaultdict
@@ -49,7 +51,7 @@ def style_table(df: pd.DataFrame, highlight_grand_total: bool = True) -> "pd.io.
     return sty
 
 # ───────────────── HEADER / THEME ─────────────────
-st.set_page_config(page_title="Greeno Big Three v1.7.5", layout="wide")
+st.set_page_config(page_title="Greeno Big Three v1.7.6", layout="wide")
 
 logo_path = "greenosu.webp"
 if os.path.exists(logo_path):
@@ -68,7 +70,7 @@ st.markdown(
 ">
   {logo_html}
   <div style="display:flex; flex-direction:column; justify-content:center;">
-      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.7.5</h1>
+      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.7.6</h1>
       <div style="height:5px; background-color:#F44336; width:300px; margin-top:10px; border-radius:3px;"></div>
   </div>
 </div>
@@ -336,6 +338,8 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes):
         lambda: defaultdict(lambda: defaultdict(dict))
     )
 
+    carryover_partial = None  # holds a partial label that broke at a page end
+
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
         carry_headers = None
         carry_total_x = None
@@ -365,6 +369,56 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes):
             current_ad: Optional[str] = None
             current_store: Optional[str] = None
             current_section: Optional[str] = None
+
+            # Helper for label text (left of first column)
+            def left_label_text(line):
+                return " ".join(
+                    w["text"].strip()
+                    for w in line["words"]
+                    if w["x1"] <= label_right_edge and w["text"].strip()
+                ).strip()
+
+            # If we have a carryover from last page, try to merge with first usable line(s)
+            if carryover_partial:
+                consumed = False
+                look_ahead_limit = min(3, len(lines))
+                for k in range(look_ahead_limit):
+                    L0 = lines[k]
+                    nxt_txt = L0["text"].strip()
+                    if (STORE_LINE_RX.match(nxt_txt)
+                        or nxt_txt in HEADINGS
+                        or SECTION_TOGO.match(nxt_txt)
+                        or SECTION_DELIV.match(nxt_txt)
+                        or SECTION_DINEIN.match(nxt_txt)):
+                        continue
+                    label_text_2 = left_label_text(L0)
+                    if not label_text_2:
+                        continue
+                    combined_label = (carryover_partial["label_text_1"] + " " + label_text_2).strip()
+                    canon2 = normalize_reason(combined_label)
+                    if canon2:
+                        sect = data[carryover_partial["ad"]].setdefault(
+                            carryover_partial["store"], {}
+                        ).setdefault(carryover_partial["section"], {})
+                        per_header = sect.setdefault("__all__", defaultdict(lambda: defaultdict(int)))
+
+                        combined_words = list(carryover_partial["words"]) + list(L0["words"])
+                        for w in combined_words:
+                            token = w["text"].strip()
+                            if not re.fullmatch(r"-?\d+", token):
+                                continue
+                            if w["x0"] <= label_right_edge:
+                                continue
+                            xmid = (w["x0"] + w["x1"]) / 2
+                            mapped = map_x_to_header(header_bins, xmid)
+                            if mapped is None or mapped not in ordered_headers:
+                                continue
+                            per_header[canon2][mapped] += int(token)
+
+                        lines.pop(k)  # consume continuation line
+                        consumed = True
+                        break
+                carryover_partial = None  # clear once attempted
 
             # ────── MAIN PARSING LOOP (wrapped label aware) ──────
             idx = 0
@@ -400,14 +454,6 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes):
                     idx += 1
                     continue
 
-                # Helper: text to left of the first column boundary
-                def left_label_text(line):
-                    return " ".join(
-                        w["text"].strip()
-                        for w in line["words"]
-                        if w["x1"] <= label_right_edge and w["text"].strip()
-                    ).strip()
-
                 # Step 1: try single-line label
                 label_text_1 = left_label_text(L)
                 canon = normalize_reason(label_text_1)
@@ -432,7 +478,16 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes):
                                 use_two_lines = True
                                 combined_words = list(L["words"]) + list(L2["words"])
 
+                # No match: if this is the last line on the page, carry it to next page
                 if not canon:
+                    if idx == len(lines) - 1:
+                        carryover_partial = {
+                            "ad": current_ad,
+                            "store": current_store,
+                            "section": current_section,
+                            "words": list(L["words"]),
+                            "label_text_1": label_text_1,
+                        }
                     idx += 1
                     continue
 
@@ -505,7 +560,6 @@ def _totals_by_period(reasons: list[str], default_sections: set[str]) -> Dict[st
 # ───────────────── QUICK GLANCE (vs previous) ─────────────────
 st.markdown("### Quick glance")
 
-# previous period (immediately left)
 try:
     cur_idx = ordered_headers.index(sel_col)
     prior_label = ordered_headers[cur_idx - 1] if cur_idx > 0 else None
@@ -896,7 +950,6 @@ def build_highlow_tables(reasons: list[str], allowed_sections: set[str], title: 
 
     df_reasons = pd.DataFrame(rows).set_index("Reason")
 
-    # Style: highlight Current if equals best (green) or worst (red)
     def highlight_current(col: pd.Series):
         styles = []
         for reason, val in col.items():
@@ -908,7 +961,6 @@ def build_highlow_tables(reasons: list[str], allowed_sections: set[str], title: 
                 styles.append("")
         return styles
 
-    # Category totals across periods (lower = better)
     totals_by_period = {p: sum(mat[p][r] for r in reasons) for p in ordered_headers}
     best_p, best_total   = min(totals_by_period.items(), key=lambda kv: kv[1])
     worst_p, worst_total = max(totals_by_period.items(), key=lambda kv: kv[1])
@@ -916,7 +968,6 @@ def build_highlow_tables(reasons: list[str], allowed_sections: set[str], title: 
     rank_list = sorted(totals_by_period.items(), key=lambda kv: kv[1])  # ascending
     current_rank_idx = next(i + 1 for i, (p, v) in enumerate(rank_list) if p == sel_col)
 
-    # KPI cards with dynamic accents for CURRENT when it ties best/worst
     current_cls = " best" if current_total == best_total else (" worst" if current_total == worst_total else "")
 
     card_css = """
@@ -959,24 +1010,17 @@ def build_highlow_tables(reasons: list[str], allowed_sections: set[str], title: 
     sty = style_table(df_reasons, highlight_grand_total=False).apply(highlight_current, subset=["Current"])
     st.dataframe(sty, use_container_width=True)
 
-# Missing → To-Go & Delivery default (override applies to Out of menu item)
 build_highlow_tables(MISSING_REASONS, {"To Go","Delivery"}, "7a) To-go Missing Complaints (To-Go + Delivery) — highs/lows")
-
-# Attitude → All segments
 build_highlow_tables(ATTITUDE_REASONS, {"Dine-In","To Go","Delivery"}, "7b) Attitude (All segments) — highs/lows")
-
-# Other → All segments
 build_highlow_tables(OTHER_REASONS, {"Dine-In","To Go","Delivery"}, "7c) Other (All segments) — highs/lows")
 
 # ───────────────── 8) EXPORT — Excel (All Sheets) ─────────────────
 st.header("8) Export results")
 buff = io.BytesIO()
 with pd.ExcelWriter(buff, engine="openpyxl") as writer:
-    # Detail + rollups
     df_detail.to_excel(writer, index=False, sheet_name="Detail")
     ad_totals.to_excel(writer, index=False, sheet_name="AD Totals")
     store_totals.to_excel(writer, index=False, sheet_name="Store Totals")
-    # Reason totals
     reason_totals_missing.to_excel(writer, sheet_name="Reason Totals (Missing)")
     reason_totals_attitude.to_excel(writer, sheet_name="Reason Totals (Attitude)")
     reason_totals_other.to_excel(writer, sheet_name="Reason Totals (Other)")

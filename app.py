@@ -1,13 +1,14 @@
-# Greeno Big Three v1.7.9 — Signature Matching
-# - Keyword-based matching for reasons (robust to line wraps & page breaks)
-# - When a keyword hits, also include numeric tokens from the next line (if it's a continuation)
-# - Quick Glance (vs previous period; lower = better)
+# Greeno Big Three v1.8.0 — Signature Matching (Tight)
+# - Keyword-based matching with *tightened* signatures (esp. compensation)
+# - Only includes next-line numbers for explicit continuations
+# - Skips any "Total:" label rows outright
+# - Quick Glance scoreboard (vs previous period; lower = better)
 # - Reason Totals (Missing/Attitude/Other) + Category Grand Totals
 # - Period Change Summary (text)
 # - Historical Context (best/worst across all periods)
 # - Single Excel export (All Sheets)
 # - Special rule: "Out of menu item" counts Dine-In + To Go + Delivery everywhere
-# - Debug panels (Unmatched labels, Ignored tokens, Token trace)
+# - Debug panels: Unmatched labels, Ignored tokens, Token trace, Header/Bin Diagnostics
 
 import io, os, re, base64, statistics
 from collections import defaultdict
@@ -51,7 +52,7 @@ def style_table(df: pd.DataFrame, highlight_grand_total: bool = True) -> "pd.io.
     return sty
 
 # ───────────────── HEADER / THEME ─────────────────
-st.set_page_config(page_title="Greeno Big Three v1.7.9", layout="wide")
+st.set_page_config(page_title="Greeno Big Three v1.8.0", layout="wide")
 
 logo_path = "greenosu.webp"
 if os.path.exists(logo_path):
@@ -70,7 +71,7 @@ st.markdown(
 ">
   {logo_html}
   <div style="display:flex; flex-direction:column; justify-content:center;">
-      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.7.9</h1>
+      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.8.0</h1>
       <div style="height:5px; background-color:#F44336; width:300px; margin-top:10px; border-radius:3px;"></div>
   </div>
 </div>
@@ -152,8 +153,7 @@ OTHER_REASONS = [
 ]
 ALL_CANONICAL = MISSING_REASONS + ATTITUDE_REASONS + OTHER_REASONS
 
-# Keyword signature map (lowercased fragments → canonical)
-# Keep fragments unique to avoid collisions with non-tracked labels.
+# Keyword signature map (lowercased fragments → canonical) — TIGHTENED
 KEYWORD_MAP = [
     # MISSING
     ("missing item (food)",          "Missing food"),
@@ -172,14 +172,15 @@ KEYWORD_MAP = [
     ("negative manager-employee interaction", "Negative mgr-employee exchange"),
     ("manager did not follow up",    "Manager did not follow up"),
     ("argued with guest",            "Argued with guest"),
-    # OTHER
-    ("long hold/no answer",          "Long hold/no answer"),
-    ("no/unsatisfactory",            "No/insufficient compensation offered"),  # signature fragment
+    # OTHER (tight)
+    ("long hold/no answer",              "Long hold/no answer"),
+    ("no/unsatisfactory compensation",   "No/insufficient compensation offered"),
+    ("compensation offered by",          "No/insufficient compensation offered"),
     ("did not attempt to resolve issue", "Did not attempt to resolve"),
     ("guest left without dining or ordering", "Guest left without ordering"),
-    ("unknowledgeable",              "Unknowledgeable"),
-    ("didn't open/close on time",    "Did not open on time"),
-    ("no/poor apology",              "No/poor apology"),
+    ("unknowledgeable",                  "Unknowledgeable"),
+    ("didn't open/close on time",        "Did not open on time"),
+    ("no/poor apology",                  "No/poor apology"),
 ]
 
 # Normalize helpers
@@ -225,6 +226,21 @@ def looks_like_name(s: str) -> bool:
     if toks & STOP_TOKENS:
         return False
     return True
+
+def is_structural_total(label_text_lc: str) -> bool:
+    # ignore total rows of any section
+    return (
+        label_text_lc.endswith(" total:") or
+        label_text_lc == "dine-in total:" or
+        label_text_lc == "to go total:" or
+        label_text_lc == "delivery total:" or
+        label_text_lc == "total:"
+    )
+
+# Only allow a continuation line for specific wrapped phrases
+CONTINUATION_PREFIXES = {
+    "No/insufficient compensation offered": ("compensation offered", "restaurant"),
+}
 
 # ───────────────── HEADER HELPERS ─────────────────
 def find_period_headers(page) -> List[Tuple[str, float, float]]:
@@ -327,7 +343,7 @@ def find_ad_for_store(lines: List[dict], store_idx: int, left_margin: float, bac
             return s
     return None
 
-# ───────────────── PARSER (Signature Matching) ─────────────────
+# ───────────────── PARSER (Signature Matching, Tight) ─────────────────
 def parse_pdf_build_ad_store_period_map(file_bytes: bytes, debug: bool = False):
     header_positions: Dict[str, float] = {}
     ordered_headers: List[str] = []
@@ -342,6 +358,7 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes, debug: bool = False):
         "ignored_tokens": [],
         "token_trace": [],
         "events": [],
+        "header_bins": [],
     }
 
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
@@ -361,8 +378,18 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes, debug: bool = False):
             carry_total_x = total_x
             header_bins = build_header_bins({h: header_positions[h] for h in ordered_headers}, total_x)
 
+            # Debug: record header/bin diagnostics
+            if debug:
+                debug_log["header_bins"].append({
+                    "page": page.page_number,
+                    "headers": [h for (h, _, _) in headers],
+                    "header_positions": {h: header_positions[h] for h in ordered_headers},
+                    "total_x": total_x,
+                    "bins": [{"period": h, "left": left, "right": right} for (h, left, right) in header_bins],
+                })
+
             first_period_x = min(header_positions[h] for h in ordered_headers)
-            # make label cutoff a bit more permissive to avoid clipping
+            # be slightly permissive to avoid clipping left label fragments
             label_right_edge = first_period_x - 10
 
             lines = extract_words_grouped(page)
@@ -414,19 +441,26 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes, debug: bool = False):
                     idx += 1
                     continue
 
-                # Signature matching on THIS line
+                # Left label on this line
                 label_text_1 = left_label_text(L)
-                canon = _matches_keyword(_lc(label_text_1))
+                label_text_1_lc = _lc(label_text_1)
 
-                # If we hit a keyword, also consider numeric tokens from the NEXT line
-                # when it's likely a wrap continuation (not a new store/section/heading).
+                # Skip any totals outright
+                if is_structural_total(label_text_1_lc):
+                    idx += 1
+                    continue
+
+                # Signature matching on THIS line
+                canon = _matches_keyword(label_text_1_lc)
+
+                # Consider numeric tokens from the NEXT line *only* for explicit continuations
                 include_next_words = False
                 if canon and (idx + 1) < len(lines):
                     L2 = lines[idx + 1]
-                    t2 = L2["text"].strip()
-                    if not (STORE_LINE_RX.match(t2) or t2 in HEADINGS or
-                            SECTION_TOGO.match(t2) or SECTION_DELIV.match(t2) or SECTION_DINEIN.match(t2)):
-                        include_next_words = True
+                    left_label_2 = left_label_text(L2)
+                    left_label_2_lc = _lc(left_label_2)
+                    cont_prefixes = CONTINUATION_PREFIXES.get(canon, ())
+                    include_next_words = any(left_label_2_lc.startswith(p) for p in cont_prefixes)
 
                 if not canon:
                     if debug:
@@ -447,7 +481,7 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes, debug: bool = False):
                 def consume_words(words):
                     for w in words:
                         token = w["text"].strip()
-                        # numeric token only
+                        # numeric only
                         if not re.fullmatch(r"-?\d+", token):
                             continue
                         # must be to the right of label area
@@ -481,7 +515,7 @@ def parse_pdf_build_ad_store_period_map(file_bytes: bytes, debug: bool = False):
                 consume_words(L["words"])
                 if include_next_words:
                     consume_words(lines[idx + 1]["words"])
-                    idx += 2  # skip the wrapped continuation line too
+                    idx += 2  # consume the continuation line
                 else:
                     idx += 1
 
@@ -511,7 +545,7 @@ sel_col = st.selectbox("Period", options=ordered_headers, index=len(ordered_head
 def _allowed_sections_for_reason(reason: str, default_sections: set[str]) -> set[str]:
     return SPECIAL_REASON_SECTIONS.get(reason, default_sections)
 
-def _total_for(period_label: str, reasons: list[str], default_sections: set[str]) -> int:
+def _total_for(period_label: Optional[str], reasons: list[str], default_sections: set[str]) -> int:
     if not period_label:
         return 0
     total = 0
@@ -706,7 +740,7 @@ tot_dinein = (
 total_series = tot_togo.add(tot_delivery, fill_value=0)
 
 # Add Dine-In ONLY for “Out of menu item”
-if "Out of menu item" in total_series.index or "Out of menu item" in tot_dinein.index:
+if "Out of menu item" in set(total_series.index).union(set(tot_dinein.index)):
     total_series.loc["Out of menu item"] = (
         float(total_series.get("Out of menu item", 0)) + float(tot_dinein.get("Out of menu item", 0))
     )
@@ -811,7 +845,7 @@ else:
                 for section, reason_map in sections.items():
                     per = reason_map.get("__all__", {})
                     for r in reasons:
-                        allowed = _allowed_sections_for_reason(r, allowed_sections)
+                        allowed = SPECIAL_REASON_SECTIONS.get(r, allowed_sections)
                         if section not in allowed:
                             continue
                         sums[r] += int(per.get(r, {}).get(period_label, 0))
@@ -889,9 +923,6 @@ else:
 # ───────────────── 7) Historical context — highs/lows vs all periods ─────────────────
 st.header("7) Historical context — highs/lows vs all periods (lower = better)")
 
-def _allowed_sections_for_block(reason: str, default_sections: set[str]) -> set[str]:
-    return SPECIAL_REASON_SECTIONS.get(reason, default_sections)
-
 def build_reason_period_matrix(reasons: list[str], default_sections: set[str]) -> dict[str, dict[str, int]]:
     mat = {p: {r: 0 for r in reasons} for p in ordered_headers}
     for ad, stores in raw_data.items():
@@ -899,7 +930,7 @@ def build_reason_period_matrix(reasons: list[str], default_sections: set[str]) -
             for sec, reason_map in sections_map.items():
                 per = reason_map.get("__all__", {})
                 for r in reasons:
-                    allowed = _allowed_sections_for_block(r, default_sections)
+                    allowed = SPECIAL_REASON_SECTIONS.get(r, default_sections)
                     if sec not in allowed:
                         continue
                     pr = per.get(r, {})
@@ -1042,3 +1073,22 @@ if debug_mode:
             col_period = st.selectbox("Filter by period:", sorted(trace_df["period"].unique()))
             filtered = trace_df[(trace_df["reason"] == col_reason) & (trace_df["period"] == col_period)]
             st.dataframe(filtered)
+
+    with st.expander("Header/Bin Diagnostics"):
+        hb = debug_log.get("header_bins", [])
+        if not hb:
+            st.info("No header/bin data captured yet.")
+        else:
+            rows = []
+            for rec in hb:
+                page = rec["page"]
+                total_x = rec["total_x"]
+                for b in rec["bins"]:
+                    rows.append({
+                        "page": page,
+                        "period": b["period"],
+                        "left": round(b["left"], 1),
+                        "right": round(b["right"], 1),
+                        "total_x": round(total_x, 1) if total_x is not None else None,
+                    })
+            st.dataframe(pd.DataFrame(rows).sort_values(["page","period"]))

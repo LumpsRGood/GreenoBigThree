@@ -1,9 +1,10 @@
-# Greeno Big Three v1.9.1
-# - Adds targeted "resolve" probe + UI expander
-# - Stronger wrapped-label capture (±2 lines)
-# - Slightly wider period bins (safer mapping near edges)
-# - Less aggressive TOTAL cutoff (reduces false drops at rightmost period)
-# - Beefed-up triggers for “Did not attempt to resolve”
+# Greeno Big Three v1.9.2
+# - Generalizes the robust "resolve" approach to ALL metrics:
+#   * 3-line wrapped-label matching, ±2-line numeric fallback
+#   * Wider period bins; softer TOTAL cutoff
+#   * Safer, more-specific triggers to avoid collisions
+# - Adds a universal Probe expander: pick any metric and see captured/ignored tokens
+# - Keeps Pure Count Mode for sanity checks
 
 import io, os, re, base64, statistics
 from collections import defaultdict
@@ -47,7 +48,7 @@ def style_table(df: pd.DataFrame, highlight_grand_total: bool = True) -> "pd.io.
     return sty
 
 # ───────────────── HEADER / THEME ─────────────────
-st.set_page_config(page_title="Greeno Big Three v1.9.1", layout="wide")
+st.set_page_config(page_title="Greeno Big Three v1.9.2", layout="wide")
 
 logo_path = "greenosu.webp"
 if os.path.exists(logo_path):
@@ -66,7 +67,7 @@ st.markdown(
 ">
   {logo_html}
   <div style="display:flex; flex-direction:column; justify-content:center;">
-      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.9.1</h1>
+      <h1 style="margin:0; font-size:2.4rem;">Greeno Big Three v1.9.2</h1>
       <div style="height:5px; background-color:#F44336; width:300px; margin-top:10px; border-radius:3px;"></div>
   </div>
 </div>
@@ -136,46 +137,52 @@ OTHER_REASONS = [
 ]
 ALL_CANONICAL = MISSING_REASONS + ATTITUDE_REASONS + OTHER_REASONS
 
-# Short, robust triggers (lowercase substring matches)
+# ── SAFER, MORE-SPECIFIC TRIGGERS (lowercase substring matches) ──
 KEYWORD_TRIGGERS = {
-    # TO-GO MISSING
-    "Missing food": ["missing food"],
-    "Order wrong": ["order wrong"],
-    "Missing condiments": ["condiments"],
-    "Out of menu item": ["out of menu"],
-    "Missing bev": ["missing bev"],
-    "Missing ingredients": ["ingredient"],
-    "Packaging to-go complaint": ["packaging"],
+    # TO-GO MISSING (To Go + Delivery; "Out of menu item" counts all segments via SPECIAL_REASON_SECTIONS)
+    "Missing food": [" missing food"],
+    "Order wrong": [" order wrong"],
+    "Missing condiments": [" missing condiment", " condiments "],
+    "Out of menu item": [" out of menu item", " out of menu"],
+    "Missing bev": [" missing bev", " missing beverage"],
+    "Missing ingredients": [" missing ingredient", " missing ingredients"],
+    "Packaging to-go complaint": [" packaging to-go", " packaging to go", " packaging complaint"],
 
     # ATTITUDE (all segments)
-    "Unprofessional/Unfriendly": ["unfriendly"],
-    "Manager directly involved": ["directly involved", "involved"],
-    "Manager not available": ["manager not available"],
-    "Manager did not visit": ["did not visit", "no visit"],
-    "Negative mgr-employee exchange": ["manager-employee", "exchange"],
-    "Manager did not follow up": ["follow up"],
-    "Argued with guest": ["argued"],
+    "Unprofessional/Unfriendly": [" unprofessional", " unfriendly"],
+    "Manager directly involved": [" manager directly involved", " directly involved"],
+    "Manager not available": [" manager not available"],
+    "Manager did not visit": [" manager did not visit", " did not visit"],
+    "Negative mgr-employee exchange": [" negative manager-employee", " negative mgr-employee"],
+    "Manager did not follow up": [" manager did not follow up", " did not follow up"],
+    "Argued with guest": [" argued with guest", " argued with the guest", " argued "],
 
     # OTHER (all segments)
-    "Long hold/no answer": ["hold", "no answer", "hung up"],
-    "No/insufficient compensation offered": ["compensation", "no/unsatisfactory", "offered by", "restaurant"],
-    # Expanded resolve triggers to handle wraps/variants
-    "Did not attempt to resolve": [
-        "did not attempt to resolve",
-        "didn't attempt to resolve",
-        "did not attempt",
-        "attempt to resolve",
-        "resolve issue",
-        "resolve",
+    "Long hold/no answer": [" long hold", " no answer", " hung up"],
+    "No/insufficient compensation offered": [
+        " no/unsatisfactory compensation offered by restaurant",
+        " compensation offered by restaurant",
+        " no/unsatisfactory compensation",
+        " no/unsatisfactory",
+        " compensation offered",
+        " compensation "
     ],
-    "Guest left without ordering": ["without ordering"],
-    "Unknowledgeable": ["unknowledgeable"],
-    "Did not open on time": ["open on time"],
-    "No/poor apology": ["apology"],
+    "Did not attempt to resolve": [
+        " did not attempt to resolve",
+        " didn't attempt to resolve",
+        " did not attempt",
+        " attempt to resolve",
+        " resolve issue",
+        " resolve "
+    ],
+    "Guest left without ordering": [" left without ordering", " guest left without"],
+    "Unknowledgeable": [" unknowledgeable"],
+    "Did not open on time": [" didn't open", " did not open on time", " open/close on time"],
+    "No/poor apology": [" no/poor apology", " poor apology"],
 }
 
 SPECIAL_REASON_SECTIONS = {
-    # Out of menu item counts across *all* segments
+    # Out of menu item counts across *all* segments per your request
     "Out of menu item": {"To Go", "Delivery", "Dine-In"}
 }
 COMP_CANON = "No/insufficient compensation offered"
@@ -221,12 +228,11 @@ def is_structural_total(label_text_lc: str) -> bool:
         label_text_lc == "total:"
     )
 
-# Helpers for probing / wrapped labels
+# ───── Wrapped-label helpers ─────
 def _left_label_from_line(line_obj, label_right_edge: float) -> str:
     return " ".join(
-        w["text"].strip()
-        for w in line_obj["words"]
-        if w["x1"] <= label_right_edge and w["text"].strip()
+      w["text"].strip() for w in line_obj["words"]
+      if w["x1"] <= label_right_edge and w["text"].strip()
     ).strip()
 
 def _concat_three_line_label(lines, i, label_right_edge: float) -> str:
@@ -284,7 +290,6 @@ def find_total_header_x(page, header_y: float) -> Optional[float]:
     return None
 
 def build_header_bins(header_positions: Dict[str, float], total_x: Optional[float]) -> List[Tuple[str, float, float]]:
-    # Widen bins slightly (±4) to avoid “fell between bins”
     def _key(h: str):
         m = re.match(r"P(\d{1,2})\s+(\d{2})", h)
         return (int(m.group(2)), int(m.group(1))) if m else (999, 999)
@@ -299,7 +304,7 @@ def build_header_bins(header_positions: Dict[str, float], total_x: Optional[floa
             right = (x + xs[i+1])/2
         else:
             right = (x + total_x)/2 if total_x is not None else x + 0.6*med_gap
-        bins.append((h, left-4, right+4))
+        bins.append((h, left-4, right+4))  # wider
     return bins
 
 def map_x_to_header(header_bins: List[Tuple[str, float, float]], xmid: float) -> Optional[str]:
@@ -326,15 +331,11 @@ def extract_words_grouped(page):
             out.append({"y": y, "x_min": ws[0]["x0"], "words": ws, "text": text})
     return out
 
-# ───────────────── PURE COUNT PARSER (no AD/Store/Segment) ─────────────────
+# ───────────────── PURE COUNT (no AD/Store/Segment) ─────────────────
 def parse_pdf_pure_counts(file_bytes: bytes, debug: bool = False):
-    counts = defaultdict(lambda: defaultdict(int))  # reason -> period -> sum
+    counts = defaultdict(lambda: defaultdict(int))
     ordered_headers: List[str] = []
-    debug_log = {
-        "token_trace": [],
-        "ignored_tokens": [],
-        "header_bins": [],
-    }
+    debug_log = {"token_trace": [], "ignored_tokens": [], "header_bins": []}
 
     def _matches_keyword(label_text_lc: str) -> Optional[str]:
         for canon, triggers in KEYWORD_TRIGGERS.items():
@@ -383,7 +384,6 @@ def parse_pdf_pure_counts(file_bytes: bytes, debug: bool = False):
                 continue
 
             def consume(line_obj, canon_reason: str) -> int:
-                # returns how many numeric tokens were captured
                 y_band = line_obj["y"]
                 got = 0
                 for w in line_obj["words"]:
@@ -396,13 +396,10 @@ def parse_pdf_pure_counts(file_bytes: bytes, debug: bool = False):
                     if abs(w_y_mid - y_band) > 0.01:
                         continue
                     xmid = (w["x0"] + w["x1"]) / 2
-                    # Less aggressive cutoff (move right by ~+2 px vs prior -1 px)
                     if total_x is not None and xmid >= (total_x + 2.0):
                         if debug:
                             debug_log["ignored_tokens"].append({
-                                "page": page.page_number,
-                                "token": token,
-                                "xmid": xmid,
+                                "page": page.page_number, "token": token, "xmid": xmid,
                                 "reason": f"{canon_reason} (>= TOTAL cutoff moved right)",
                             })
                         continue
@@ -410,9 +407,7 @@ def parse_pdf_pure_counts(file_bytes: bytes, debug: bool = False):
                     if mapped is None or mapped not in ordered_headers:
                         if debug:
                             debug_log["ignored_tokens"].append({
-                                "page": page.page_number,
-                                "token": token,
-                                "xmid": xmid,
+                                "page": page.page_number, "token": token, "xmid": xmid,
                                 "reason": f"{canon_reason} (no header bin)",
                             })
                         continue
@@ -420,28 +415,24 @@ def parse_pdf_pure_counts(file_bytes: bytes, debug: bool = False):
                     got += 1
                     if debug:
                         debug_log["token_trace"].append({
-                            "page": page.page_number,
-                            "reason": canon_reason,
-                            "period": mapped,
-                            "value": int(token),
+                            "page": page.page_number, "reason": canon_reason,
+                            "period": mapped, "value": int(token),
                         })
                 return got
 
             i = 0
             while i < len(lines):
                 L = lines[i]
-                # 3-line concatenated label for robust matching
                 label_lc = _concat_three_line_label(lines, i, label_right_edge)
 
-                # compensation (up to 3-line wrap)
+                # compensation special-case
                 if ("no/unsatisfactory" in label_lc or
                     "compensation offered by" in label_lc or
                     label_lc.strip().endswith(" restaurant") or
-                    "compensation" in label_lc):
-                    canon = "No/insufficient compensation offered"
+                    " compensation " in label_lc):
+                    canon = COMP_CANON
                     got = consume(L, canon)
-                    # also scan neighbors (wrap)
-                    for j in (i-1, i+1):
+                    for j in (i-1, i+1, i-2, i+2):
                         if 0 <= j < len(lines):
                             got += consume(lines[j], canon)
                     i += 1
@@ -454,13 +445,11 @@ def parse_pdf_pure_counts(file_bytes: bytes, debug: bool = False):
 
                 got = consume(L, canon)
                 if got == 0:
-                    # adjacent-line fallback ±2
                     for j in (i-1, i+1, i-2, i+2):
                         if 0 <= j < len(lines):
                             got += consume(lines[j], canon)
                             if got:
                                 break
-
                 i += 1
 
     return counts, ordered_headers, debug_log
@@ -470,7 +459,6 @@ def parse_pdf_full(file_bytes: bytes, debug: bool = False):
     header_positions: Dict[str, float] = {}
     ordered_headers: List[str] = []
     pairs_debug: List[Tuple[str, str]] = []
-
     data: Dict[str, Dict[str, Dict[str, Dict[str, Dict[str, int]]]]] = defaultdict(
         lambda: defaultdict(lambda: defaultdict(dict))
     )
@@ -523,7 +511,6 @@ def parse_pdf_full(file_bytes: bytes, debug: bool = False):
 
             first_period_x = min(header_positions[h] for h in ordered_headers)
             label_right_edge = first_period_x - 10
-
             lines = extract_words_grouped(page)
             if not lines:
                 continue
@@ -545,28 +532,21 @@ def parse_pdf_full(file_bytes: bytes, debug: bool = False):
                     if abs(w_y_mid - y_band) > 0.01:
                         continue
                     xmid = (w["x0"] + w["x1"]) / 2
-                    # Less aggressive TOTAL cutoff (move right by ~+2 px)
                     if total_x is not None and xmid >= (total_x + 2.0):
                         if debug:
                             debug_log["ignored_tokens"].append({
-                                "page": page.page_number,
-                                "token": token,
-                                "xmid": xmid,
+                                "page": page.page_number, "token": token, "xmid": xmid,
                                 "reason": f"{canon_reason} (>= TOTAL cutoff moved right)",
-                                "store": current_store,
-                                "section": current_section,
+                                "store": current_store, "section": current_section,
                             })
                         continue
                     mapped = map_x_to_header(header_bins, xmid)
                     if mapped is None or mapped not in ordered_headers:
                         if debug:
                             debug_log["ignored_tokens"].append({
-                                "page": page.page_number,
-                                "token": token,
-                                "xmid": xmid,
+                                "page": page.page_number, "token": token, "xmid": xmid,
                                 "reason": f"{canon_reason} (no header bin)",
-                                "store": current_store,
-                                "section": current_section,
+                                "store": current_store, "section": current_section,
                             })
                         continue
                     sect = data[current_ad].setdefault(current_store, {}).setdefault(current_section, {})
@@ -575,13 +555,9 @@ def parse_pdf_full(file_bytes: bytes, debug: bool = False):
 
                     if debug:
                         debug_log["token_trace"].append({
-                            "page": page.page_number,
-                            "ad": current_ad,
-                            "store": current_store,
-                            "section": current_section,
-                            "reason": canon_reason,
-                            "period": mapped,
-                            "value": int(token),
+                            "page": page.page_number, "ad": current_ad, "store": current_store,
+                            "section": current_section, "reason": canon_reason,
+                            "period": mapped, "value": int(token),
                         })
                         debug_log["facts"].append({
                             "Area Director": current_ad, "Store": current_store, "Section": current_section,
@@ -663,17 +639,14 @@ def parse_pdf_full(file_bytes: bytes, debug: bool = False):
                     current_section = "Dine-In";  idx += 1; continue
 
                 if txt in HEADINGS:
-                    idx += 1
-                    continue
+                    idx += 1; continue
                 if not (current_ad and current_store and current_section in {"To Go", "Delivery", "Dine-In"}):
-                    idx += 1
-                    continue
+                    idx += 1; continue
 
-                # 3-line concatenated label (wrap-safe)
-                label_lc = _concat_three_line_label(lines, idx, (min(header_positions[h] for h in ordered_headers) - 10))
+                label_right_edge = min(header_positions[h] for h in ordered_headers) - 10
+                label_lc = _concat_three_line_label(lines, idx, label_right_edge)
                 if is_structural_total(label_lc):
-                    idx += 1
-                    continue
+                    idx += 1; continue
 
                 canon = _matches_keyword(label_lc)
 
@@ -682,11 +655,10 @@ def parse_pdf_full(file_bytes: bytes, debug: bool = False):
                     "no/unsatisfactory" in label_lc or
                     "compensation offered by" in label_lc or
                     label_lc.strip().endswith(" restaurant") or
-                    "compensation" in label_lc
+                    " compensation " in label_lc
                 ):
                     canon = COMP_CANON
                     consume_words(L, canon)
-                    # scan ±2 neighbors for wrapped numbers
                     for j in (idx-1, idx+1, idx-2, idx+2):
                         if 0 <= j < len(lines):
                             consume_words(lines[j], canon)
@@ -695,21 +667,16 @@ def parse_pdf_full(file_bytes: bytes, debug: bool = False):
 
                 if not canon:
                     if debug:
-                        # keep unmatched for later review
-                        left_text = _left_label_from_line(L, (min(header_positions[h] for h in ordered_headers) - 10))
+                        left_text = _left_label_from_line(L, label_right_edge)
                         debug_log["unmatched_labels"].append({
-                            "page": page.page_number,
-                            "text": left_text,
-                            "ad": current_ad,
-                            "store": current_store,
-                            "section": current_section,
+                            "page": page.page_number, "text": left_text,
+                            "ad": current_ad, "store": current_store, "section": current_section,
                         })
                     idx += 1
                     continue
 
                 got = consume_and_count(L, canon)
                 if got == 0:
-                    # adjacent-line fallback ±2
                     captured = False
                     for j in (idx-1, idx+1, idx-2, idx+2):
                         if 0 <= j < len(lines):
@@ -720,11 +687,8 @@ def parse_pdf_full(file_bytes: bytes, debug: bool = False):
                     if debug and captured:
                         debug_log["events"].append({
                             "type": "adjacent_capture",
-                            "reason": canon,
-                            "page": page.page_number,
-                            "ad": current_ad,
-                            "store": current_store,
-                            "section": current_section,
+                            "reason": canon, "page": page.page_number,
+                            "ad": current_ad, "store": current_store, "section": current_section,
                             "note": "numbers on adjacent line due to wrap (±2)",
                         })
                 idx += 1
@@ -747,10 +711,12 @@ if not ordered_headers:
 st.header("2) Pick the period")
 sel_col = st.selectbox("Period", options=ordered_headers, index=len(ordered_headers)-1)
 
-# ───────────────── TARGETED PROBE UI (always available) ─────────────────
-with st.expander("🔎 Probe: Did not attempt to resolve (why might counts be missing?)", expanded=False):
-    run_probe = st.checkbox("Run resolve-probe on the whole PDF (slow-ish)")
+# ───────────────── UNIVERSAL PROBE (any metric) ─────────────────
+with st.expander("🔎 Probe any metric (wraps, bins, TOTAL cutoff)", expanded=False):
+    reason_choice = st.selectbox("Metric to probe", options=ALL_CANONICAL, index=ALL_CANONICAL.index("Did not attempt to resolve"))
+    run_probe = st.checkbox("Run probe across entire PDF", value=False)
     if run_probe and pdfplumber is not None:
+        trig_list = KEYWORD_TRIGGERS.get(reason_choice, [])
         probe_rows = []
         with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
             header_positions = {}
@@ -778,16 +744,10 @@ with st.expander("🔎 Probe: Did not attempt to resolve (why might counts be mi
                 lines = extract_words_grouped(page)
                 if not lines:
                     continue
+
                 for i, L in enumerate(lines):
                     cat_lc = _concat_three_line_label(lines, i, label_right_edge)
-                    if not any(t in cat_lc for t in [
-                        "did not attempt to resolve",
-                        "didn't attempt to resolve",
-                        "did not attempt",
-                        "attempt to resolve",
-                        "resolve issue",
-                        "resolve"
-                    ]):
+                    if not any(t in cat_lc for t in trig_list):
                         continue
                     neighborhood = [x for x in (i-2, i-1, i, i+1, i+2) if 0 <= x < len(lines)]
                     seen_any = False
@@ -814,6 +774,7 @@ with st.expander("🔎 Probe: Did not attempt to resolve (why might counts be mi
                                 seen_any = True
                             probe_rows.append({
                                 "page": page.page_number,
+                                "metric": reason_choice,
                                 "label_3line": cat_lc,
                                 "token": token,
                                 "xmid": round(xmid, 2),
@@ -824,6 +785,7 @@ with st.expander("🔎 Probe: Did not attempt to resolve (why might counts be mi
                     if not seen_any:
                         probe_rows.append({
                             "page": page.page_number,
+                            "metric": reason_choice,
                             "label_3line": cat_lc,
                             "token": "",
                             "xmid": None,
@@ -836,14 +798,13 @@ with st.expander("🔎 Probe: Did not attempt to resolve (why might counts be mi
             st.dataframe(df_probe, use_container_width=True)
             buff_probe = io.BytesIO()
             df_probe.to_csv(buff_probe, index=False)
-            st.download_button("📥 Download probe CSV", buff_probe.getvalue(), "probe_resolve.csv", "text/csv")
+            st.download_button("📥 Download probe CSV", buff_probe.getvalue(), "probe_metric.csv", "text/csv")
         else:
-            st.info("No resolve-like labels found by the probe.")
+            st.info("No matching labels found by the probe for the selected metric.")
 
 # ───────────────── PURE COUNT MODE UI ─────────────────
 if pure_mode:
     st.header("3) Pure Count — reason × period (ignores AD/Store/Segment)")
-
     periods = ordered_headers
     df_pure = pd.DataFrame(index=ALL_CANONICAL, columns=periods).fillna(0).astype(int)
     for reason, per_map in counts_pure.items():
@@ -884,7 +845,6 @@ if pure_mode:
     st.subheader("Reason × Period counts")
     st.dataframe(style_table(df_pure), use_container_width=True)
 
-    # Quick “Did not attempt to resolve” sanity readout
     try:
         total_resolve = int(df_pure.loc["Did not attempt to resolve", periods].sum())
         sel_resolve   = int(df_pure.loc["Did not attempt to resolve", sel_col])
@@ -950,7 +910,7 @@ if df.empty:
     st.warning("No matching reasons found for the selected period.")
     st.stop()
 
-# For export only (not displayed)
+# For export only
 store_totals = (
     df.groupby(["Area Director","Store"], as_index=False)["Value"].sum()
       .rename(columns={"Value":"Store Total"})
@@ -1083,38 +1043,23 @@ st.header("4) Reason totals — To-go Missing Complaints (selected period)")
 st.caption("To-Go and Delivery columns shown; Total for “Out of menu item” includes Dine-In as well.")
 
 missing_df = df_all[(df_all["Reason"].isin(MISSING_REASONS)) & (df_all["Period"] == sel_col)]
+def _order_series_missing(s: pd.Series) -> pd.Series: return s.reindex(MISSING_REASONS)
 
-def _order_series_missing(s: pd.Series) -> pd.Series:
-    return s.reindex(MISSING_REASONS)
-
-tot_togo = (
-    missing_df[missing_df["Section"] == "To Go"]
-      .groupby("Reason", as_index=True)["Value"].sum()
-)
-tot_delivery = (
-    missing_df[missing_df["Section"] == "Delivery"]
-      .groupby("Reason", as_index=True)["Value"].sum()
-)
-tot_dinein = (
-    missing_df[missing_df["Section"] == "Dine-In"]
-      .groupby("Reason", as_index=True)["Value"].sum()
-)
+tot_togo = (missing_df[missing_df["Section"] == "To Go"].groupby("Reason", as_index=True)["Value"].sum())
+tot_delivery = (missing_df[missing_df["Section"] == "Delivery"].groupby("Reason", as_index=True)["Value"].sum())
+tot_dinein = (missing_df[missing_df["Section"] == "Dine-In"].groupby("Reason", as_index=True)["Value"].sum())
 
 total_series = tot_togo.add(tot_delivery, fill_value=0)
 if "Out of menu item" in set(total_series.index).union(set(tot_dinein.index)):
-    total_series.loc["Out of menu item"] = (
-        float(total_series.get("Out of menu item", 0)) + float(tot_dinein.get("Out of menu item", 0))
-    )
+    total_series.loc["Out of menu item"] = float(total_series.get("Out of menu item", 0)) + float(tot_dinein.get("Out of menu item", 0))
 
 reason_totals_missing = pd.DataFrame({
     "To Go": _order_series_missing(tot_togo).fillna(0).astype(int),
     "Delivery": _order_series_missing(tot_delivery).fillna(0).astype(int),
     "Total": _order_series_missing(total_series).fillna(0).astype(int),
 })
-
 cat_grand_total_missing = int(reason_totals_missing["Total"].sum())
 st.metric("Category Grand Total — To-go Missing Complaints", cat_grand_total_missing)
-
 reason_totals_missing.loc["— Grand Total —"] = reason_totals_missing.sum(numeric_only=True)
 st.dataframe(style_table(reason_totals_missing), use_container_width=True)
 
@@ -1123,9 +1068,7 @@ st.header("4b) Reason totals — Attitude (selected period)")
 st.caption("All segments (Dine-In, To Go, Delivery).")
 
 att_df = df_all[(df_all["Reason"].isin(ATTITUDE_REASONS)) & (df_all["Period"] == sel_col)]
-
-def _order_series_att(s: pd.Series) -> pd.Series:
-    return s.reindex(ATTITUDE_REASONS)
+def _order_series_att(s: pd.Series) -> pd.Series: return s.reindex(ATTITUDE_REASONS)
 
 att_dinein = att_df[att_df["Section"] == "Dine-In"].groupby("Reason", as_index=True)["Value"].sum().astype(int)
 att_togo = att_df[att_df["Section"] == "To Go"].groupby("Reason", as_index=True)["Value"].sum().astype(int)
@@ -1138,10 +1081,8 @@ reason_totals_attitude = pd.DataFrame({
     "Delivery": _order_series_att(att_delivery),
     "Total": _order_series_att(att_total),
 }).fillna(0).astype(int)
-
 cat_grand_total_att = int(reason_totals_attitude["Total"].sum())
 st.metric("Category Grand Total — Attitude", cat_grand_total_att)
-
 reason_totals_attitude.loc["— Grand Total —"] = reason_totals_attitude.sum(numeric_only=True)
 st.dataframe(style_table(reason_totals_attitude), use_container_width=True)
 
@@ -1150,9 +1091,7 @@ st.header("4c) Reason totals — Other (selected period)")
 st.caption("All segments (Dine-In, To Go, Delivery).")
 
 oth_df = df_all[(df_all["Reason"].isin(OTHER_REASONS)) & (df_all["Period"] == sel_col)]
-
-def _order_series_other(s: pd.Series) -> pd.Series:
-    return s.reindex(OTHER_REASONS)
+def _order_series_other(s: pd.Series) -> pd.Series: return s.reindex(OTHER_REASONS)
 
 oth_dinein = oth_df[oth_df["Section"] == "Dine-In"].groupby("Reason", as_index=True)["Value"].sum().astype(int)
 oth_togo = oth_df[oth_df["Section"] == "To Go"].groupby("Reason", as_index=True)["Value"].sum().astype(int)
@@ -1165,10 +1104,8 @@ reason_totals_other = pd.DataFrame({
     "Delivery": _order_series_other(oth_delivery),
     "Total": _order_series_other(oth_total),
 }).fillna(0).astype(int)
-
 cat_grand_total_other = int(reason_totals_other["Total"].sum())
 st.metric("Category Grand Total — Other", cat_grand_total_other)
-
 reason_totals_other.loc["— Grand Total —"] = reason_totals_other.sum(numeric_only=True)
 st.dataframe(style_table(reason_totals_other), use_container_width=True)
 
@@ -1201,14 +1138,11 @@ with pd.ExcelWriter(qa, engine="openpyxl") as writer:
         if hb:
             rows = []
             for rec in hb:
-                page = rec["page"]
-                total_x = rec["total_x"]
+                page = rec["page"]; total_x = rec["total_x"]
                 for b in rec["bins"]:
                     rows.append({
-                        "page": page,
-                        "period": b["period"],
-                        "left": round(b[1],1),
-                        "right": round(b[2],1),
+                        "page": page, "period": b["period"],
+                        "left": round(b[1],1), "right": round(b[2],1),
                         "total_x": round(total_x,1) if total_x is not None else None,
                     })
             pd.DataFrame(rows).to_excel(writer, index=False, sheet_name="Header Bins")

@@ -1,9 +1,4 @@
-# Java for tabula-py
 openjdk-17-jre-headless
-
-# Camelot system deps
 ghostscript
 poppler-utils
-
-# (optional but nice to have)
 tesseract-ocr

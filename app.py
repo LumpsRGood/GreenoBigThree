@@ -1,9 +1,9 @@
-# Greeno Big Three v1.9.3 — Precision Patch Edition
-# - Fixes multi-line label bleed
-# - Adds anchored regex for (Food)/(Bev)/Condiments
-# - Adds de-dupe for numeric tokens
-# - Tightens y-band tolerance and fallback rules
-# - Keeps UI, scoreboard, and export identical to v1.9.0
+# Greeno Big Three v1.9.3 — Precision Patch Edition (Full Version)
+# - Fixes multi-line bleed and cross-row counting
+# - Anchored regex for (Food)/(Bev)/Condiments
+# - Adds per-page de-dupe of numeric tokens
+# - Tight y-band (±0.6) and single-side fallback
+# - Same visuals and exports as v1.9.0
 
 import io, os, re, base64, statistics
 from collections import defaultdict
@@ -85,7 +85,7 @@ ALL_CANONICAL=MISSING_REASONS+ATTITUDE_REASONS+OTHER_REASONS
 COMP_CANON="No/insufficient compensation offered"
 SPECIAL_REASON_SECTIONS={"Out of menu item":{"To Go","Delivery","Dine-In"}}
 
-# ────────── Trigger definitions (anchored for food/bev/condiments) ──────────
+# ────────── Trigger definitions ──────────
 KEYWORD_TRIGGERS={
     "Unprofessional/Unfriendly":["unfriendly"],
     "Manager directly involved":["directly involved","involved"],
@@ -119,7 +119,6 @@ def _matches_keyword(label_text_lc:str)->Optional[str]:
             if t in label_text_lc: return canon
     return None
 
-# ───────────────── UTILITIES ─────────────────
 def _lc(s:str)->str: return re.sub(r"\s+"," ",s.lower().strip())
 def _round_to(x:float,base:int=2)->float: return round(x/base)*base
 def looks_like_name(s:str)->bool:
@@ -142,18 +141,16 @@ def extract_words_grouped(page):
 
 # ───────────────── PURE COUNT MODE ─────────────────
 def parse_pdf_pure_counts(file_bytes:bytes,debug=False):
-    counts=defaultdict(lambda:defaultdict(int)); debug_log={"token_trace":[],"ignored":[]}
+    counts=defaultdict(lambda:defaultdict(int))
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-        header_positions={}
         for page in pdf.pages:
-            words=extract_words_grouped(page)
-            if not words: continue
+            lines=extract_words_grouped(page)
+            if not lines: continue
             claimed=set()
-            first_periods=[w for w in page.extract_words() if HEADER_RX.search(w["text"])]
-            if not first_periods: continue
-            first_x=min(float(w["x0"]) for w in first_periods)
+            header_words=[w for w in page.extract_words() if HEADER_RX.search(w["text"])]
+            if not header_words: continue
+            first_x=min(float(w["x0"]) for w in header_words)
             label_right_edge=first_x-12
-            lines=words
             i=0
             while i<len(lines):
                 L=lines[i]; label=" ".join(w["text"].strip() for w in L["words"]
@@ -171,7 +168,7 @@ def parse_pdf_pure_counts(file_bytes:bytes,debug=False):
                     key=(xmid,wy)
                     if key in claimed: continue
                     claimed.add(key)
-                    counts[canon]["P9 25"]+=int(tok)  # simplified header mapping placeholder
+                    counts[canon]["TOTAL"]+=int(tok)
                     got+=1
                 if got==0 and i+1<len(lines):
                     ny=lines[i+1]["y"]
@@ -185,24 +182,80 @@ def parse_pdf_pure_counts(file_bytes:bytes,debug=False):
                                     key=(xmid,wy)
                                     if key not in claimed:
                                         claimed.add(key)
-                                        counts[canon]["P9 25"]+=int(tok)
+                                        counts[canon]["TOTAL"]+=int(tok)
                 i+=1
-    return counts,["P9 25"],debug_log
+    return counts,["TOTAL"],{}
 
 # ───────────────── FULL PARSER ─────────────────
-# (for brevity identical structure to 1.9.0 but with same y-band/claim/fallback edits as above)
-# In your existing full parser, insert the same:
-#   - label_right_edge = first_period_x - 12
-#   - abs(w_y_mid - y_band) > 0.6 check
-#   - claimed_cells set
-#   - single-neighbor fallback logic
+def parse_pdf_full(file_bytes:bytes,debug=False):
+    data=defaultdict(lambda:defaultdict(lambda:defaultdict(dict)))
+    with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+        for page in pdf.pages:
+            lines=extract_words_grouped(page)
+            if not lines: continue
+            claimed_cells=set()
+            current_ad=current_store=current_section=None
+            header_words=[w for w in page.extract_words() if HEADER_RX.search(w["text"])]
+            if not header_words: continue
+            first_x=min(float(w["x0"]) for w in header_words)
+            label_right_edge=first_x-12
+            i=0
+            while i<len(lines):
+                txt=lines[i]["text"].strip()
+                if STORE_LINE_RX.match(txt):
+                    current_store=txt; i+=1; continue
+                if SECTION_TOGO.match(txt): current_section="To Go"; i+=1; continue
+                if SECTION_DELIV.match(txt): current_section="Delivery"; i+=1; continue
+                if SECTION_DINEIN.match(txt): current_section="Dine-In"; i+=1; continue
+                label=" ".join(w["text"].strip() for w in lines[i]["words"]
+                               if w["x1"]<=label_right_edge-2).strip()
+                if not label: i+=1; continue
+                canon=_matches_keyword(_lc(label))
+                if not canon: i+=1; continue
+                got=0; yband=lines[i]["y"]
+                for w in lines[i]["words"]:
+                    tok=w["text"].strip()
+                    if not re.fullmatch(r"-?\d+",tok): continue
+                    wy=_round_to((w["top"]+w["bottom"])/2,1)
+                    if abs(wy-yband)>0.6: continue
+                    xmid=round((w["x0"]+w["x1"])/2,1)
+                    cell=(round(xmid,1),round(wy,1))
+                    if cell in claimed_cells: continue
+                    claimed_cells.add(cell)
+                    data[current_ad][current_store][current_section].setdefault(canon,defaultdict(int))
+                    data[current_ad][current_store][current_section][canon]["TOTAL"]+=int(tok)
+                    got+=1
+                if got==0 and i+1<len(lines):
+                    ny=lines[i+1]["y"]
+                    if abs(ny-lines[i]["y"])<5:
+                        for w in lines[i+1]["words"]:
+                            tok=w["text"].strip()
+                            if re.fullmatch(r"-?\d+",tok):
+                                wy=_round_to((w["top"]+w["bottom"])/2,1)
+                                if abs(wy-lines[i+1]["y"])<=0.6:
+                                    xmid=round((w["x0"]+w["x1"])/2,1)
+                                    cell=(round(xmid,1),round(wy,1))
+                                    if cell not in claimed_cells:
+                                        claimed_cells.add(cell)
+                                        data[current_ad][current_store][current_section].setdefault(canon,defaultdict(int))
+                                        data[current_ad][current_store][current_section][canon]["TOTAL"]+=int(tok)
+                i+=1
+    return data,["TOTAL"],{}
 
-# ───────────────── RUN ─────────────────
-with st.spinner("Processing…"):
-    if pure_mode:
-        counts_pure,ordered,dbg=parse_pdf_pure_counts(file_bytes,debug_mode)
-        df=pd.DataFrame(counts_pure).T.fillna(0).astype(int)
-        st.dataframe(df)
-        st.stop()
-    else:
-        st.warning("Full parser omitted for brevity—insert updated tolerance logic as above.")
+# ───────────────── RUN APP ─────────────────
+if pure_mode:
+    counts,headers,_=parse_pdf_pure_counts(file_bytes)
+    df=pd.DataFrame(counts).T.fillna(0).astype(int)
+    df["Grand Total"]=df.sum(axis=1)
+    st.dataframe(style_table(df))
+else:
+    data,headers,_=parse_pdf_full(file_bytes)
+    rows=[]
+    for ad,stores in data.items():
+        for stn,sects in stores.items():
+            for sec,reasons in sects.items():
+                for rname,vals in reasons.items():
+                    rows.append({"AD":ad,"Store":stn,"Section":sec,"Reason":rname,"Value":vals.get("TOTAL",0)})
+    df=pd.DataFrame(rows)
+    if df.empty: st.warning("No data parsed."); st.stop()
+    st.dataframe(style_table(df.pivot_table(index=["Section","Reason"],values="Value",aggfunc="sum")))

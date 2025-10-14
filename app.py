@@ -139,16 +139,16 @@ ALL_CANONICAL = MISSING_REASONS + ATTITUDE_REASONS + OTHER_REASONS
 
 # ── SAFER, MORE-SPECIFIC TRIGGERS (lowercase substring matches) ──
 KEYWORD_TRIGGERS = {
-    # TO-GO MISSING (To Go + Delivery; "Out of menu item" counts all segments via SPECIAL_REASON_SECTIONS)
-    "Missing food": [" missing food"],
+    # TO-GO MISSING (tight, unambiguous anchors)
+    "Missing food": ["item (food)"],                # e.g. "Missing Item (Food)"
     "Order wrong": [" order wrong"],
-    "Missing condiments": [" missing condiment", " condiments "],
+    "Missing condiments": ["condiments"],           # “Missing Condiments”
     "Out of menu item": [" out of menu item", " out of menu"],
-    "Missing bev": [" missing bev", " missing beverage"],
+    "Missing bev": ["item (bev)"],                  # e.g. "Missing Item (Bev)"
     "Missing ingredients": [" missing ingredient", " missing ingredients"],
     "Packaging to-go complaint": [" packaging to-go", " packaging to go", " packaging complaint"],
 
-    # ATTITUDE (all segments)
+    # ATTITUDE (unchanged)
     "Unprofessional/Unfriendly": [" unprofessional", " unfriendly"],
     "Manager directly involved": [" manager directly involved", " directly involved"],
     "Manager not available": [" manager not available"],
@@ -157,7 +157,7 @@ KEYWORD_TRIGGERS = {
     "Manager did not follow up": [" manager did not follow up", " did not follow up"],
     "Argued with guest": [" argued with guest", " argued with the guest", " argued "],
 
-    # OTHER (all segments)
+    # OTHER (unchanged)
     "Long hold/no answer": [" long hold", " no answer", " hung up"],
     "No/insufficient compensation offered": [
         " no/unsatisfactory compensation offered by restaurant",

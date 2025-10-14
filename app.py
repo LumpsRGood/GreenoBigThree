@@ -1,6 +1,10 @@
-# Greeno Big Three v1.9.2 — Stitch Mode
-# Fix: stitch label-only lines with the following numeric line (common in this PDF),
-# then map numbers to period columns using header bins. No Tabula/Camelot needed.
+# Greeno Big Three v1.9.3 — Deep Stitch
+# - Robust line stitching:
+#   * Merge multi-line labels (2+ lines) before numbers
+#   * Cross-page stitching: carry dangling label to next page
+# - Wider label zone tolerance
+# - Reason x Period rollups + category totals
+# - Debug exports to validate stitching & header bins
 
 import io, os, re, base64, statistics
 from collections import defaultdict
@@ -13,8 +17,8 @@ try:
 except Exception:
     pdfplumber = None
 
-# ───────────────── STYLING HELPERS ─────────────────
-def style_table(df: pd.DataFrame, highlight_grand_total: bool = True) -> "pd.io.formats.style.Styler":
+# ───────────────── STYLING ─────────────────
+def style_table(df: pd.DataFrame, highlight_grand_total: bool = True):
     def zebra(series):
         return [
             "background-color: #F5F7FA" if i % 2 == 0 else "background-color: #E9EDF2"
@@ -32,7 +36,7 @@ def style_table(df: pd.DataFrame, highlight_grand_total: bool = True) -> "pd.io.
         )
         .apply(zebra, axis=0)
     )
-    if highlight_grand_total:
+    if highlight_grand_total and "— Grand Total —" in df.index.astype(str):
         def highlight_total(row):
             if str(row.name) == "— Grand Total —":
                 return ["background-color: #FFE39B; color: #111; font-weight: 700;"] * len(row)
@@ -43,8 +47,8 @@ def style_table(df: pd.DataFrame, highlight_grand_total: bool = True) -> "pd.io.
     )
     return sty
 
-# ───────────────── HEADER / THEME ─────────────────
-st.set_page_config(page_title="Greeno Big Three v1.9.2 — Stitch Mode", layout="wide")
+# ───────────────── PAGE HEADER / THEME ─────────────────
+st.set_page_config(page_title="Greeno Big Three v1.9.3 — Deep Stitch", layout="wide")
 
 logo_path = "greenosu.webp"
 if os.path.exists(logo_path):
@@ -63,7 +67,7 @@ st.markdown(
 ">
   {logo_html}
   <div style="display:flex; flex-direction:column; justify-content:center;">
-      <h1 style="margin:0; font-size:2.2rem;">Greeno Big Three v1.9.2 — Stitch Mode</h1>
+      <h1 style="margin:0; font-size:2.2rem;">Greeno Big Three v1.9.3 — Deep Stitch</h1>
       <div style="height:5px; background-color:#F44336; width:300px; margin-top:10px; border-radius:3px;"></div>
   </div>
 </div>
@@ -75,7 +79,7 @@ st.markdown(
 with st.sidebar:
     st.header("1) Upload PDF")
     up = st.file_uploader("Choose the PDF report", type=["pdf"])
-    st.caption("Stitch Mode merges label-only lines with the next numeric line before parsing.")
+    st.caption("Deep Stitch merges multi-line labels and attaches numeric rows; also stitches across page breaks.")
     st.divider()
     debug_mode = st.checkbox("🔍 Enable Debug Mode", value=False)
 
@@ -103,16 +107,15 @@ if not up:
     )
     st.stop()
 
-file_bytes = up.read()
 if pdfplumber is None:
-    st.error("pdfplumber is not installed. Run: pip install pdfplumber")
+    st.error("pdfplumber is not installed. Add `pdfplumber` to requirements.txt")
     st.stop()
 
-# ───────────────── CONSTANTS ─────────────────
-HEADER_RX      = re.compile(r"\bP(?:1[0-2]|[1-9])\s+(?:2[0-9])\b")
-PERIOD_COL_RX  = re.compile(r"^P(?:[1-9]|1[0-2])\s+\d{2}$", re.I)
+file_bytes = up.read()
 
-# Canonical sets
+# ───────────────── CONSTANTS ─────────────────
+HEADER_RX = re.compile(r"\bP(?:1[0-2]|[1-9])\s+(?:2[0-9])\b")
+
 MISSING_REASONS = [
     "Missing food","Order wrong","Missing condiments","Out of menu item",
     "Missing bev","Missing ingredients","Packaging to-go complaint",
@@ -128,7 +131,7 @@ OTHER_REASONS = [
 ]
 ALL_CANONICAL = MISSING_REASONS + ATTITUDE_REASONS + OTHER_REASONS
 
-# Strict first (anchored), then substrings
+# Strict anchors (preferred)
 KEYWORD_REGEX = {
     "Missing food":               re.compile(r"\bmissing\s+item\s*\(food\)", re.I),
     "Missing bev":                re.compile(r"\bmissing\s+item\s*\(bev\)",  re.I),
@@ -137,6 +140,7 @@ KEYWORD_REGEX = {
     "Out of menu item":           re.compile(r"\bout\s+of\s+menu\s+item",    re.I),
     "Packaging to-go complaint":  re.compile(r"\bpackaging\s+to-?\s*go",     re.I),
 }
+# Safe substrings (fallback)
 KEYWORD_SUBSTR = {
     "Order wrong":                          ["order wrong"],
     "Unprofessional/Unfriendly":            ["unfriendly"],
@@ -156,29 +160,27 @@ KEYWORD_SUBSTR = {
 }
 COMP_CANON = "No/insufficient compensation offered"
 
-# ───────────────── SMALL UTILS ─────────────────
+# ───────────────── UTILS ─────────────────
 def _lc(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").lower().strip())
 
 def _round_to(x: float, base: int = 2) -> float:
     return round(x / base) * base
 
-def _coerce_int(token: str) -> Optional[int]:
-    if token is None:
-        return None
-    t = str(token).strip()
-    if not re.fullmatch(r"-?\d+", t):
-        return None
-    try:
-        return int(t)
-    except Exception:
-        return None
-
 def sort_headers(headers: List[str]) -> List[str]:
     def key(h: str):
         m = re.match(r"P(\d{1,2})\s+(\d{2})", h)
         return (int(m.group(2)), int(m.group(1))) if m else (999, 999)
     return sorted(headers, key=key)
+
+def is_structural_total(label_text_lc: str) -> bool:
+    return (
+        label_text_lc.endswith(" total:") or
+        label_text_lc == "dine-in total:" or
+        label_text_lc == "to go total:" or
+        label_text_lc == "delivery total:" or
+        label_text_lc == "total:"
+    )
 
 # ───────────────── HEADER FINDERS ─────────────────
 def find_period_headers(page) -> List[Tuple[str, float, float]]:
@@ -215,7 +217,7 @@ def find_total_header_x(page, header_y: float) -> Optional[float]:
     words = page.extract_words(x_tolerance=1.0, y_tolerance=2.0, keep_blank_chars=False, use_text_flow=True)
     for w in words:
         y_mid = _round_to((w["top"] + w["bottom"]) / 2, 2)
-        if abs(y_mid - header_y) <= 2.5 and w["text"].strip().lower() == "total":
+        if abs(y_mid - header_y) <= 2.8 and w["text"].strip().lower() == "total":
             return (w["x0"] + w["x1"]) / 2
     return None
 
@@ -229,12 +231,12 @@ def build_header_bins(header_positions: Dict[str, float], total_x: Optional[floa
     med_gap = statistics.median([xs[i+1]-xs[i] for i in range(len(xs)-1)]) if len(xs) >= 2 else 60.0
     bins = []
     for i, (h, x) in enumerate(zip(headers, xs)):
-        left = (xs[i-1] + x)/2 if i > 0 else x - 0.5*med_gap
+        left = (xs[i-1] + x)/2 if i > 0 else x - 0.55*med_gap
         if i < len(xs) - 1:
             right = (x + xs[i+1])/2
         else:
             right = (x + (total_x if total_x is not None else (x + 0.6*med_gap)))/2
-        bins.append((h, left-2, right+2))  # widen 2px for safety
+        bins.append((h, left-3, right+3))  # widen 3px
     return bins
 
 def map_x_to_header(header_bins: List[Tuple[str, float, float]], xmid: float) -> Optional[str]:
@@ -243,10 +245,10 @@ def map_x_to_header(header_bins: List[Tuple[str, float, float]], xmid: float) ->
             return h
     return None
 
-# ───────────────── LINE GROUP & STITCH ─────────────────
+# ───────────────── GROUP WORDS ─────────────────
 def extract_words_grouped(page):
     words = page.extract_words(
-        x_tolerance=1.4, y_tolerance=2.4,
+        x_tolerance=1.5, y_tolerance=2.6,
         keep_blank_chars=False, use_text_flow=True
     )
     lines = defaultdict(list)
@@ -261,31 +263,101 @@ def extract_words_grouped(page):
             out.append({"y": y, "x_min": ws[0]["x0"], "words": ws, "text": text})
     return out
 
-def stitch_label_with_numeric(lines: List[dict], label_right_edge: float) -> List[dict]:
+# ───────────────── DEEP STITCH ─────────────────
+def deep_stitch_labels_and_numbers(all_pages_lines: List[List[dict]], first_period_x_by_page: Dict[int, float]):
     """
-    If a line has no digits and is fully left of the first period column,
-    and the very next line has digits (period values), merge them into one line.
+    1) Within each page:
+       - Collapse consecutive label-only lines (left of period, no digits) into one label block.
+       - Attach the immediate following numeric line to that label block.
+    2) Across pages:
+       - If a page ends with a dangling label block (no numbers attached),
+         carry it and prepend to the first numeric line on the next page.
     """
-    stitched = []
-    i = 0
-    while i < len(lines):
-        L = lines[i]
-        txt = L["text"].strip()
-        left_of_period = all(w["x1"] <= label_right_edge for w in L["words"])
-        has_digit = any(re.search(r"\d", w["text"]) for w in L["words"])
-        if left_of_period and not has_digit and i + 1 < len(lines):
-            N = lines[i + 1]
-            next_has_digit = any(re.search(r"\d", w["text"]) for w in N["words"])
-            if next_has_digit:
-                # merge: take L label words (all), plus all next line words
-                merged_words = L["words"] + N["words"]
-                merged_text = " ".join(w["text"].strip() for w in merged_words if w["text"].strip())
-                stitched.append({"y": L["y"], "x_min": min(L["x_min"], N["x_min"]), "words": merged_words, "text": merged_text})
-                i += 2
+    stitched_pages = []
+    carry_label_block = None  # (page_number, text, words, y, x_min)
+
+    for page_idx, lines in enumerate(all_pages_lines, start=1):
+        stitched = []
+        label_right_edge = first_period_x_by_page.get(page_idx, None)
+        if label_right_edge is None:
+            stitched_pages.append([])
+            continue
+        label_right_edge -= 8  # widen label zone
+
+        def is_label_only(L: dict) -> bool:
+            left_of_period = all(w["x1"] <= label_right_edge for w in L["words"])
+            has_digit = any(re.search(r"\d", w["text"]) for w in L["words"])
+            return left_of_period and not has_digit
+
+        def is_numeric_row(L: dict) -> bool:
+            # numeric tokens to the right of label zone
+            has_num = any(re.fullmatch(r"-?\d+", w["text"].strip()) for w in L["words"])
+            right_tokens = [w for w in L["words"] if w["x0"] > label_right_edge]
+            return has_num and len(right_tokens) > 0
+
+        i = 0
+        # If there's a carry_label_block from previous page, try to attach to the FIRST numeric row on this page
+        if carry_label_block:
+            # find first numeric row
+            j = 0
+            attached = False
+            while j < len(lines):
+                if is_numeric_row(lines[j]):
+                    merged_words = carry_label_block["words"] + lines[j]["words"]
+                    merged_text = " ".join(w["text"].strip() for w in merged_words if w["text"].strip())
+                    stitched.append({
+                        "y": carry_label_block["y"],
+                        "x_min": min(carry_label_block["x_min"], lines[j]["x_min"]),
+                        "words": merged_words,
+                        "text": merged_text,
+                    })
+                    i = j + 1
+                    attached = True
+                    break
+                j += 1
+            if not attached:
+                # no numeric row on this page; keep carrying
+                stitched_pages.append(stitched)  # empty or whatever we have
                 continue
-        stitched.append(L)
-        i += 1
-    return stitched
+            carry_label_block = None  # consumed
+
+        while i < len(lines):
+            L = lines[i]
+            if is_label_only(L):
+                # collapse consecutive label-only lines
+                label_words = list(L["words"])
+                label_y = L["y"]
+                label_xmin = L["x_min"]
+                i += 1
+                while i < len(lines) and is_label_only(lines[i]):
+                    label_words += lines[i]["words"]
+                    label_y = min(label_y, lines[i]["y"])
+                    label_xmin = min(label_xmin, lines[i]["x_min"])
+                    i += 1
+                # now expect a numeric row; if none on this page, carry to next page
+                if i < len(lines) and is_numeric_row(lines[i]):
+                    merged_words = label_words + lines[i]["words"]
+                    merged_text = " ".join(w["text"].strip() for w in merged_words if w["text"].strip())
+                    stitched.append({
+                        "y": label_y,
+                        "x_min": label_xmin,
+                        "words": merged_words,
+                        "text": merged_text,
+                    })
+                    i += 1
+                else:
+                    # carry this label block to next page
+                    carry_label_block = {"y": label_y, "x_min": label_xmin, "words": label_words}
+                    # and stop processing this page (remaining rows likely unrelated)
+                    break
+            else:
+                # keep rows that aren't pure labels (might be unrelated headings; we ignore later)
+                stitched.append(L)
+                i += 1
+
+        stitched_pages.append(stitched)
+
+    return stitched_pages
 
 # ───────────────── MATCH HELPERS ─────────────────
 def match_reason(label_text: str) -> Optional[str]:
@@ -301,23 +373,52 @@ def match_reason(label_text: str) -> Optional[str]:
         return COMP_CANON
     return None
 
-def is_structural_total(label_text_lc: str) -> bool:
-    return (
-        label_text_lc.endswith(" total:") or
-        label_text_lc == "dine-in total:" or
-        label_text_lc == "to go total:" or
-        label_text_lc == "delivery total:" or
-        label_text_lc == "total:"
-    )
-
-# ───────────────── PURE COUNT PARSER WITH STITCH ─────────────────
-def parse_pdf_stitched_counts(file_bytes: bytes, debug: bool = False):
+# ───────────────── PARSER ─────────────────
+def parse_pdf_deep_stitch_counts(file_bytes: bytes, debug: bool = False):
     counts = defaultdict(lambda: defaultdict(int))  # reason -> period -> sum
     ordered_headers: List[str] = []
-    debug_log = {"token_trace": [], "ignored_tokens": [], "header_bins": []}
+    debug_log = {"token_trace": [], "ignored_tokens": [], "header_bins": [], "stitched_preview": []}
 
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
         header_positions: Dict[str, float] = {}
+        carry_headers = None
+        carry_total_x = None
+
+        # first pass: collect header x per page and lines per page
+        all_pages_lines = []
+        first_period_x_by_page = {}
+
+        for page in pdf.pages:
+            headers = find_period_headers(page) or carry_headers
+            if not headers:
+                all_pages_lines.append([])
+                continue
+            # only reset carry if we found real headers on this page
+            if find_period_headers(page):
+                carry_headers = headers[:]
+                carry_total_x = None
+            for htxt, xc, _ in headers:
+                header_positions[htxt] = xc
+            ordered_headers = sort_headers(list(header_positions.keys()))
+            header_y = min(h[2] for h in headers)
+            total_x = find_total_header_x(page, header_y) or carry_total_x
+            if total_x is not None:
+                carry_total_x = total_x
+
+            first_period_x = min(header_positions[h] for h in ordered_headers)
+            first_period_x_by_page[page.page_number] = first_period_x
+
+            lines = extract_words_grouped(page)
+            all_pages_lines.append(lines)
+
+        if not ordered_headers:
+            return counts, ordered_headers, debug_log
+
+        # build stitched pages with cross-page handling
+        stitched_pages = deep_stitch_labels_and_numbers(all_pages_lines, first_period_x_by_page)
+
+        # now do counting pass using bins for each page (recompute per page to get total_x)
+        header_positions = {}
         carry_headers = None
         carry_total_x = None
 
@@ -328,16 +429,13 @@ def parse_pdf_stitched_counts(file_bytes: bytes, debug: bool = False):
             if find_period_headers(page):
                 carry_headers = headers[:]
                 carry_total_x = None
-
             for htxt, xc, _ in headers:
                 header_positions[htxt] = xc
             ordered_headers = sort_headers(list(header_positions.keys()))
             header_y = min(h[2] for h in headers)
-
             total_x = find_total_header_x(page, header_y) or carry_total_x
             if total_x is not None:
                 carry_total_x = total_x
-
             header_bins = build_header_bins({h: header_positions[h] for h in ordered_headers}, total_x)
             if debug:
                 debug_log["header_bins"].append({
@@ -347,16 +445,19 @@ def parse_pdf_stitched_counts(file_bytes: bytes, debug: bool = False):
                     "bins": header_bins,
                 })
 
-            first_period_x = min(header_positions[h] for h in ordered_headers)
-            label_right_edge = first_period_x - 10
+            # stitch result for this page
+            lines = stitched_pages[page.page_number - 1]
+            if debug:
+                # keep a preview (first 12 rows) of stitched text per page
+                preview = [{"page": page.page_number, "text": L["text"]} for L in lines[:12]]
+                debug_log["stitched_preview"].extend(preview)
 
-            # Group + STITCH
-            lines = extract_words_grouped(page)
-            lines = stitch_label_with_numeric(lines, label_right_edge)
             if not lines:
                 continue
 
-            # Helpers
+            first_period_x = min(header_positions[h] for h in ordered_headers)
+            label_right_edge = first_period_x - 8  # match deep stitch tolerance
+
             def left_label_text(line):
                 return " ".join(
                     w["text"].strip()
@@ -364,8 +465,7 @@ def parse_pdf_stitched_counts(file_bytes: bytes, debug: bool = False):
                     if w["x1"] <= label_right_edge and w["text"].strip()
                 ).strip()
 
-            def consume(line_obj, canon_reason: str) -> int:
-                got = 0
+            def consume(line_obj, canon_reason: str):
                 y_band = line_obj["y"]
                 for w in line_obj["words"]:
                     token = w["text"].strip()
@@ -393,15 +493,12 @@ def parse_pdf_stitched_counts(file_bytes: bytes, debug: bool = False):
                             })
                         continue
                     counts[canon_reason][mapped] += int(token)
-                    got += 1
                     if debug:
                         debug_log["token_trace"].append({
                             "page": page.page_number, "reason": canon_reason,
                             "period": mapped, "value": int(token)
                         })
-                return got
 
-            # Walk stitched lines
             i = 0
             while i < len(lines):
                 L = lines[i]
@@ -412,7 +509,7 @@ def parse_pdf_stitched_counts(file_bytes: bytes, debug: bool = False):
                     i += 1
                     continue
 
-                # compensation 3-line wrap safety
+                # compensation: grab neighbors too
                 if ("no/unsatisfactory" in label_lc or
                     "compensation offered by" in label_lc or
                     label_lc.strip() == "restaurant" or
@@ -429,17 +526,14 @@ def parse_pdf_stitched_counts(file_bytes: bytes, debug: bool = False):
                     i += 1
                     continue
 
-                got = consume(L, canon)
-                if got == 0:
-                    if i > 0: got += consume(lines[i-1], canon)
-                    if got == 0 and i + 1 < len(lines): got += consume(lines[i+1], canon)
+                consume(L, canon)
                 i += 1
 
     return counts, ordered_headers, debug_log
 
 # ───────────────── RUN ─────────────────
 with st.spinner("Roll Tide…"):
-    counts_map, ordered_headers, debug_log = parse_pdf_stitched_counts(file_bytes, debug=debug_mode)
+    counts_map, ordered_headers, debug_log = parse_pdf_deep_stitch_counts(file_bytes, debug=debug_mode)
 
 if not ordered_headers:
     st.error("No period headers (like ‘P9 25’) found.")
@@ -449,7 +543,7 @@ if not ordered_headers:
 st.header("2) Pick the period")
 sel_col = st.selectbox("Period", options=ordered_headers, index=len(ordered_headers)-1)
 
-# ───────────────── BUILD REASON × PERIOD TABLE ─────────────────
+# ───────────────── REASON x PERIOD TABLE ─────────────────
 periods = ordered_headers
 df_all = pd.DataFrame(index=ALL_CANONICAL, columns=periods).fillna(0).astype(int)
 for reason, per_map in counts_map.items():
@@ -458,7 +552,7 @@ for reason, per_map in counts_map.items():
             df_all.loc[reason, p] = int(v)
 df_all["Total"] = df_all[periods].sum(axis=1)
 
-# Category grand totals (selected period)
+# Category totals (selected)
 tot_missing = int(df_all.loc[MISSING_REASONS, sel_col].sum())
 tot_att     = int(df_all.loc[ATTITUDE_REASONS, sel_col].sum())
 tot_other   = int(df_all.loc[OTHER_REASONS, sel_col].sum())
@@ -489,37 +583,40 @@ st.markdown(
 
 # ───────────────── SECTION TABLES ─────────────────
 st.header("3) Reason totals — To-go Missing Complaints")
-reason_totals_missing = pd.DataFrame({
-    "Total": df_all.loc[MISSING_REASONS, sel_col].astype(int)
-}).rename_axis("Reason")
-reason_totals_missing.loc["— Grand Total —"] = reason_totals_missing.sum(numeric_only=True)
-st.dataframe(style_table(reason_totals_missing), use_container_width=True)
+missing_df = pd.DataFrame({"Total": df_all.loc[MISSING_REASONS, sel_col].astype(int)})
+missing_df.loc["— Grand Total —"] = missing_df.sum(numeric_only=True)
+st.dataframe(style_table(missing_df), use_container_width=True)
 
 st.header("3b) Reason totals — Attitude")
-reason_totals_att = pd.DataFrame({
-    "Total": df_all.loc[ATTITUDE_REASONS, sel_col].astype(int)
-}).rename_axis("Reason")
-reason_totals_att.loc["— Grand Total —"] = reason_totals_att.sum(numeric_only=True)
-st.dataframe(style_table(reason_totals_att), use_container_width=True)
+att_df = pd.DataFrame({"Total": df_all.loc[ATTITUDE_REASONS, sel_col].astype(int)})
+att_df.loc["— Grand Total —"] = att_df.sum(numeric_only=True)
+st.dataframe(style_table(att_df), use_container_width=True)
 
 st.header("3c) Reason totals — Other")
-reason_totals_other = pd.DataFrame({
-    "Total": df_all.loc[OTHER_REASONS, sel_col].astype(int)
-}).rename_axis("Reason")
-reason_totals_other.loc["— Grand Total —"] = reason_totals_other.sum(numeric_only=True)
-st.dataframe(style_table(reason_totals_other), use_container_width=True)
+oth_df = pd.DataFrame({"Total": df_all.loc[OTHER_REASONS, sel_col].astype(int)})
+oth_df.loc["— Grand Total —"] = oth_df.sum(numeric_only=True)
+st.dataframe(style_table(oth_df), use_container_width=True)
 
 # ───────────────── EXPORTS ─────────────────
 st.header("4) Export results")
 buff = io.BytesIO()
 with pd.ExcelWriter(buff, engine="openpyxl") as writer:
     df_all.to_excel(writer, sheet_name="Reason x Period (All)", index=True)
-    reason_totals_missing.to_excel(writer, sheet_name="Missing (Selected)", index=True)
-    reason_totals_att.to_excel(writer, sheet_name="Attitude (Selected)", index=True)
-    reason_totals_other.to_excel(writer, sheet_name="Other (Selected)", index=True)
+    missing_df.to_excel(writer, sheet_name="Missing (Selected)", index=True)
+    att_df.to_excel(writer, sheet_name="Attitude (Selected)", index=True)
+    oth_df.to_excel(writer, sheet_name="Other (Selected)", index=True)
     if debug_mode:
         pd.DataFrame(debug_log.get("token_trace", [])).to_excel(writer, sheet_name="Token Trace", index=False)
         pd.DataFrame(debug_log.get("ignored_tokens", [])).to_excel(writer, sheet_name="Ignored Tokens", index=False)
+        pd.DataFrame(debug_log.get("stitched_preview", [])).to_excel(writer, sheet_name="Stitched Preview", index=False)
+        # bins compact view
+        rows = []
+        for rec in debug_log.get("header_bins", []):
+            page = rec["page"]; total_x = rec["total_x"]
+            for (period,left,right) in rec["bins"]:
+                rows.append({"page":page,"period":period,"left":round(left,1),"right":round(right,1),"total_x":round(total_x,1) if total_x else None})
+        if rows:
+            pd.DataFrame(rows).to_excel(writer, sheet_name="Header Bins", index=False)
 
 st.download_button(
     "📥 Download Excel (All Sheets)",

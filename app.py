@@ -1,4 +1,5 @@
-# Greeno Big Three v1.9.3 — Minimal/safe fix: wrap-aware labels + strict matching + Pure Count toggle
+# Greeno Big Three v1.9.4 — Minimal change: merge wrapped labels before matching
+# UI kept simple: title, sidebar upload, "Roll Tide" spinner, Pure Count toggle, 3 tables with grand totals.
 
 from __future__ import annotations
 import io
@@ -10,21 +11,19 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-# You need pdfplumber in your environment (Streamlit Cloud: add to requirements.txt)
+# Dependency: pdfplumber (add to requirements.txt on Streamlit Cloud)
 try:
     import pdfplumber
 except Exception as e:
     st.error("Missing dependency: pdfplumber\n\n" + str(e))
     st.stop()
 
-st.set_page_config(page_title="Greeno Big Three v1.9.3", layout="wide")
-
+st.set_page_config(page_title="Greeno Big Three v1.9.4", layout="wide")
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Configuration
+# Config / Canonical reasons (unchanged)
 # ───────────────────────────────────────────────────────────────────────────────
 
-# Period headers like "P9 25"
 PERIOD_RE = re.compile(r"\bP(\d{1,2})\s*(\d{2})\b", re.I)
 TOTAL_HDR_RE = re.compile(r"\bTotal\b", re.I)
 NUM_RE = re.compile(r"\b\d+\b")
@@ -61,7 +60,7 @@ CATEGORIES = OrderedDict({
 
 ALL_CANON = [m for group in CATEGORIES.values() for m in group]
 
-# Strict regex triggers on *normalized* label text
+# STRICT regex triggers (we only match these phrases after normalization)
 REGEX_TRIGGERS: Dict[str, List[str]] = {
     # TO-GO MISSING
     "Missing food":                 [r"\bmissing\s+food\b"],
@@ -94,9 +93,8 @@ REGEX_TRIGGERS: Dict[str, List[str]] = {
     "No/poor apology":              [r"\bno\/?poor\s+apology\b"],
 }
 
-
 # ───────────────────────────────────────────────────────────────────────────────
-# Helpers (safe, minimal additions)
+# Helpers — ONLY logic added: merge wrapped labels before matching
 # ───────────────────────────────────────────────────────────────────────────────
 
 def norm_label(s: str) -> str:
@@ -128,18 +126,13 @@ def cluster_lines(words: List[dict], y_tol: float = 2.0) -> List[List[dict]]:
     for w in words:
         t = w["top"]
         if last_top is None or abs(t - last_top) <= y_tol:
-            current.append(w)
-            last_top = t if last_top is None else (last_top + t) / 2
+            current.append(w); last_top = t if last_top is None else (last_top + t) / 2
         else:
             lines.append(sorted(current, key=lambda z: z["x0"]))
-            current = [w]
-            last_top = t
+            current = [w]; last_top = t
     if current:
         lines.append(sorted(current, key=lambda z: z["x0"]))
     return lines
-
-def line_text(words: List[dict]) -> str:
-    return " ".join(w["text"] for w in words).strip()
 
 def group_has_number(words: List[dict]) -> bool:
     return any(NUM_RE.fullmatch(w["text"]) for w in words)
@@ -147,7 +140,7 @@ def group_has_number(words: List[dict]) -> bool:
 def merge_wrapped_label_lines(line_word_groups: List[List[dict]]) -> List[List[dict]]:
     """
     Merge vertically wrapped label fragments (consecutive lines that both have no numbers).
-    Keeps your original order and word positions.
+    This is the ONLY behavioral change you asked for.
     """
     merged: List[List[dict]] = []
     i = 0
@@ -157,14 +150,12 @@ def merge_wrapped_label_lines(line_word_groups: List[List[dict]]) -> List[List[d
             bucket = list(g)
             j = i + 1
             while j < len(line_word_groups) and not group_has_number(line_word_groups[j]):
-                bucket.extend(line_word_groups[j])
-                j += 1
+                bucket.extend(line_word_groups[j]); j += 1
             bucket = sorted(bucket, key=lambda w: w["x0"])
             merged.append(bucket)
             i = j
         else:
-            merged.append(g)
-            i += 1
+            merged.append(g); i += 1
     return merged
 
 def detect_headers(page) -> "OrderedDict[str, float]":
@@ -176,7 +167,7 @@ def detect_headers(page) -> "OrderedDict[str, float]":
     if not words:
         return OrderedDict()
     h = float(page.height)
-    top_cut = h * 0.22  # header region near the top
+    top_cut = h * 0.22
     header_words = [w for w in words if w["top"] <= top_cut]
 
     found: List[Tuple[float, str]] = []
@@ -188,7 +179,6 @@ def detect_headers(page) -> "OrderedDict[str, float]":
             cx = (w["x0"] + w["x1"]) / 2.0
             found.append((cx, label))
         elif TOTAL_HDR_RE.search(t):
-            # ignore "Total" header
             pass
 
     found.sort(key=lambda z: z[0])
@@ -197,6 +187,9 @@ def detect_headers(page) -> "OrderedDict[str, float]":
         pos_map.setdefault(lab, []).append(cx)
     # average duplicates
     return OrderedDict((lab, float(np.mean(xs))) for lab, xs in pos_map.items())
+
+def line_text(words: List[dict]) -> str:
+    return " ".join(w["text"] for w in words).strip()
 
 def left_text_and_numbers(line_words: List[dict], header_x_map: Dict[str, float]) -> Tuple[str, List[Tuple[str, int]]]:
     """
@@ -231,9 +224,8 @@ def period_sort_key(p: str) -> Tuple[int, int]:
         return (999, 99)
     return (int(m.group(1)), int(m.group(2)))
 
-
 # ───────────────────────────────────────────────────────────────────────────────
-# Core parsing (minimal changes applied here)
+# Core parsing — only change is: use merge_wrapped_label_lines before matching
 # ───────────────────────────────────────────────────────────────────────────────
 
 def parse_pdf_full(file_bytes: bytes) -> Tuple[List[str], Dict[str, Dict[str, Dict[str, int]]]]:
@@ -257,21 +249,19 @@ def parse_pdf_full(file_bytes: bytes) -> Tuple[List[str], Dict[str, Dict[str, Di
             if not words:
                 continue
 
-            # Build lines, then merge wrapped label fragments (new)
+            # Build lines, then merge wrapped label fragments (ONLY new behavior)
             line_groups = cluster_lines(words, y_tol=2.0)
             merged_groups = merge_wrapped_label_lines(line_groups)
 
             for g in merged_groups:
                 label_txt, nums = left_text_and_numbers(g, header_x)
                 if not nums:
-                    # numberless line => label-only; numbers will appear on its data line
-                    # (we skip to avoid double counting)
-                    continue
+                    continue  # label-only line
 
                 n = norm_label(label_txt)
                 canon = match_canon(n)
 
-                # Special-case: compensation 3-part phrase when merged
+                # Compensation phrase sometimes merges as full sentence
                 if not canon and ("compensation" in n or "restaurant" in n or "unsatisfactory" in n):
                     if looks_like_comp_phrase(label_txt):
                         canon = "No/insufficient compensation offered"
@@ -280,14 +270,12 @@ def parse_pdf_full(file_bytes: bytes) -> Tuple[List[str], Dict[str, Dict[str, Di
                     continue
 
                 for per, val in nums:
-                    # Route to the correct category bucket
                     for cat, reason_list in CATEGORIES.items():
                         if canon in reason_list:
                             counts[cat][canon][per] += val
 
     periods_all = sorted(set(periods_all), key=period_sort_key)
     return periods_all, counts
-
 
 def parse_pdf_pure_counts(file_bytes: bytes) -> Dict[str, int]:
     """
@@ -308,7 +296,6 @@ def parse_pdf_pure_counts(file_bytes: bytes) -> Dict[str, int]:
                 s = line_text(g)
                 if not NUM_RE.search(s):
                     continue
-                # remove digits to leave the label-ish portion for matching
                 label_only = NUM_RE.sub(" ", s)
                 n = norm_label(label_only)
                 canon = match_canon(n)
@@ -324,12 +311,11 @@ def parse_pdf_pure_counts(file_bytes: bytes) -> Dict[str, int]:
 
     return totals
 
-
 # ───────────────────────────────────────────────────────────────────────────────
-# UI
+# UI — simple and unchanged structure
 # ───────────────────────────────────────────────────────────────────────────────
 
-st.title("Greeno Big Three v1.9.3")
+st.title("Greeno Big Three v1.9.4")
 
 with st.sidebar:
     st.subheader("Upload")
@@ -358,7 +344,6 @@ with st.spinner("Roll Tide"):
             df = pd.DataFrame(
                 [{"Reason": r, "Total": totals.get(r, 0)} for r in reason_list]
             )
-            # Style for readability (zebra + subtle borders)
             st.dataframe(df, use_container_width=True, hide_index=True)
     else:
         periods, counts = parse_pdf_full(file_bytes)
@@ -366,7 +351,6 @@ with st.spinner("Roll Tide"):
             st.error("No period headers detected. Check the file formatting.")
             st.stop()
 
-        # For each category, render period table with grand total
         for cat, reason_list in CATEGORIES.items():
             st.subheader(cat)
 
@@ -387,5 +371,4 @@ with st.spinner("Roll Tide"):
             total_row["Total"] = sum(total_row[p] for p in periods)
             df = pd.concat([df, pd.DataFrame([total_row])], ignore_index=True)
 
-            # Display
             st.dataframe(df, use_container_width=True, hide_index=True)

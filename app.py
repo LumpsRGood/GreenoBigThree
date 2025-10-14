@@ -1,8 +1,8 @@
+# file: app.py
 # Greeno Big Three v1.9.0 — adds Pure Count Mode (ignore AD/Store/Segment)
-# - Normal mode (existing): AD/Store/Segment-aware parsing
-# - NEW: Pure Count Mode toggle that strictly counts by reason x period only
-# - Uses the same header-bin logic, TOTAL cutoff, compensation special case,
-#   and adjacent-line fallback to catch wrapped labels (prev/next line)
+# - Normal mode: AD/Store/Segment-aware parsing
+# - Pure Count Mode: strictly counts by reason × period only
+# - Shared: header-bin logic, TOTAL cutoff, compensation special case, adjacent-line fallback
 
 import io, os, re, base64, statistics
 from collections import defaultdict
@@ -18,6 +18,7 @@ except Exception:
 # ───────────────── STYLING HELPERS ─────────────────
 def style_table(df: pd.DataFrame, highlight_grand_total: bool = True) -> "pd.io.formats.style.Styler":
     def zebra(series):
+        # why: row zebra; axis=0 applies per-column; enumerate idx reused for each column -> consistent stripes
         return [
             "background-color: #F5F7FA" if i % 2 == 0 else "background-color: #E9EDF2"
             for i, _ in enumerate(series)
@@ -135,7 +136,6 @@ OTHER_REASONS = [
 ]
 ALL_CANONICAL = MISSING_REASONS + ATTITUDE_REASONS + OTHER_REASONS
 
-# Short, robust triggers (lowercase substring matches)
 KEYWORD_TRIGGERS = {
     # TO-GO MISSING
     "Missing food": ["missing food"],
@@ -166,8 +166,7 @@ KEYWORD_TRIGGERS = {
 }
 
 SPECIAL_REASON_SECTIONS = {
-    # Out of menu item counts across *all* segments
-    "Out of menu item": {"To Go", "Delivery", "Dine-In"}
+    "Out of menu item": {"To Go", "Delivery", "Dine-In"}  # why: this reason spans all segments
 }
 COMP_CANON = "No/insufficient compensation offered"
 
@@ -272,8 +271,7 @@ def build_header_bins(header_positions: Dict[str, float], total_x: Optional[floa
             right = (x + xs[i+1])/2
         else:
             right = (x + total_x)/2 if total_x is not None else x + 0.6*med_gap
-        # widen slightly for safety
-        bins.append((h, left-2, right+2))
+        bins.append((h, left-2, right+2))  # why: pad slightly to be forgiving
     return bins
 
 def map_x_to_header(header_bins: List[Tuple[str, float, float]], xmid: float) -> Optional[str]:
@@ -300,15 +298,27 @@ def extract_words_grouped(page):
             out.append({"y": y, "x_min": ws[0]["x0"], "words": ws, "text": text})
     return out
 
+# ───────────────── DEBUG HELPERS ─────────────────
+def _dbg_bins_to_rows(rec: dict) -> List[dict]:
+    # unify both modes to dict bins
+    rows = []
+    page = rec.get("page")
+    total_x = rec.get("total_x")
+    for b in rec.get("bins", []):
+        rows.append({
+            "page": page,
+            "period": b["period"],
+            "left": b["left"],
+            "right": b["right"],
+            "total_x": total_x,
+        })
+    return rows
+
 # ───────────────── PURE COUNT PARSER (no AD/Store/Segment) ─────────────────
 def parse_pdf_pure_counts(file_bytes: bytes, debug: bool = False):
     counts = defaultdict(lambda: defaultdict(int))  # reason -> period -> sum
     ordered_headers: List[str] = []
-    debug_log = {
-        "token_trace": [],
-        "ignored_tokens": [],
-        "header_bins": [],
-    }
+    debug_log = {"token_trace": [], "ignored_tokens": [], "header_bins": []}
 
     def _matches_keyword(label_text_lc: str) -> Optional[str]:
         for canon, triggers in KEYWORD_TRIGGERS.items():
@@ -323,10 +333,11 @@ def parse_pdf_pure_counts(file_bytes: bytes, debug: bool = False):
         carry_total_x = None
 
         for page in pdf.pages:
-            headers = find_period_headers(page) or carry_headers
+            headers_once = find_period_headers(page)
+            headers = headers_once or carry_headers
             if not headers:
                 continue
-            if find_period_headers(page):
+            if headers_once:
                 carry_headers = headers[:]
                 carry_total_x = None
 
@@ -346,7 +357,7 @@ def parse_pdf_pure_counts(file_bytes: bytes, debug: bool = False):
                     "page": page.page_number,
                     "header_positions": {h: header_positions[h] for h in ordered_headers},
                     "total_x": total_x,
-                    "bins": header_bins,
+                    "bins": [{"period": h, "left": left, "right": right} for (h, left, right) in header_bins],
                 })
 
             first_period_x = min(header_positions[h] for h in ordered_headers)
@@ -364,7 +375,6 @@ def parse_pdf_pure_counts(file_bytes: bytes, debug: bool = False):
                 ).strip()
 
             def consume(line_obj, canon_reason: str) -> int:
-                # returns how many numeric tokens were captured
                 y_band = line_obj["y"]
                 got = 0
                 for w in line_obj["words"]:
@@ -418,7 +428,7 @@ def parse_pdf_pure_counts(file_bytes: bytes, debug: bool = False):
                     "compensation offered by" in label_lc or
                     label_lc.strip() == "restaurant" or
                     "compensation" in label_lc):
-                    canon = "No/insufficient compensation offered"
+                    canon = COMP_CANON
                     consume(L, canon)
                     if i > 0: consume(lines[i-1], canon)
                     if i + 1 < len(lines): consume(lines[i+1], canon)
@@ -471,10 +481,11 @@ def parse_pdf_full(file_bytes: bytes, debug: bool = False):
         carry_headers = None
         carry_total_x = None
         for page in pdf.pages:
-            headers = find_period_headers(page) or carry_headers
+            headers_once = find_period_headers(page)
+            headers = headers_once or carry_headers
             if not headers:
                 continue
-            if find_period_headers(page):
+            if headers_once:
                 carry_headers = headers[:]
                 carry_total_x = None
             for htxt, xc, _ in headers:
@@ -592,6 +603,7 @@ def parse_pdf_full(file_bytes: bytes, debug: bool = False):
 
             def find_ad_for_store(lines: List[dict], store_idx: int, left_margin: float, back_limit: int = 12) -> Optional[str]:
                 def is_left_aligned(x): return (x - left_margin) <= 24
+                # why: prefer nearest left-aligned name above; then broaden
                 for j in range(store_idx - 1, max(store_idx - back_limit, -1), -1):
                     cand = lines[j]
                     s = cand["text"].strip()
@@ -756,7 +768,6 @@ sel_col = st.selectbox("Period", options=ordered_headers, index=len(ordered_head
 if pure_mode:
     st.header("3) Pure Count — reason × period (ignores AD/Store/Segment)")
 
-    # Build table reason x period
     periods = ordered_headers
     df_pure = pd.DataFrame(index=ALL_CANONICAL, columns=periods).fillna(0).astype(int)
     for reason, per_map in counts_pure.items():
@@ -765,7 +776,6 @@ if pure_mode:
                 df_pure.loc[reason, p] = int(v)
     df_pure["Total"] = df_pure.sum(axis=1)
 
-    # Show selected period subtotals by category
     def cat_total(reasons): return int(df_pure.loc[reasons, sel_col].sum())
 
     tot_missing = cat_total(MISSING_REASONS)
@@ -798,7 +808,6 @@ if pure_mode:
     st.subheader("Reason × Period counts")
     st.dataframe(style_table(df_pure), use_container_width=True)
 
-    # Quick “Did not attempt to resolve” sanity readout
     try:
         total_resolve = int(df_pure.loc["Did not attempt to resolve", periods].sum())
         sel_resolve   = int(df_pure.loc["Did not attempt to resolve", sel_col])
@@ -806,11 +815,9 @@ if pure_mode:
     except Exception:
         pass
 
-    # Export
     buff = io.BytesIO()
     with pd.ExcelWriter(buff, engine="openpyxl") as writer:
         df_pure.to_excel(writer, sheet_name="Pure Count (All Periods)")
-        # category rollups per period
         roll = pd.DataFrame({
             "Category": ["To-go Missing Complaints","Attitude","Other","Overall"],
             **{p: [
@@ -822,7 +829,6 @@ if pure_mode:
         })
         roll["Total"] = roll[periods].sum(axis=1)
         roll.to_excel(writer, sheet_name="Category Rollups", index=False)
-        # optional debug
         if debug_mode:
             pd.DataFrame(debug_log.get("token_trace", [])).to_excel(writer, sheet_name="Token Trace", index=False)
             pd.DataFrame(debug_log.get("ignored_tokens", [])).to_excel(writer, sheet_name="Ignored Tokens", index=False)
@@ -830,10 +836,7 @@ if pure_mode:
             if hb:
                 rows = []
                 for rec in hb:
-                    page = rec["page"]
-                    total_x = rec["total_x"]
-                    for (period,left,right) in rec["bins"]:
-                        rows.append({"page":page,"period":period,"left":left,"right":right,"total_x":total_x})
+                    rows.extend(_dbg_bins_to_rows(rec))
                 pd.DataFrame(rows).to_excel(writer, sheet_name="Header Bins", index=False)
 
     st.download_button(
@@ -843,13 +846,9 @@ if pure_mode:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
-    # In Pure Mode we stop here (skip the AD/Store views)
     st.stop()
 
 # ───────────────── NORMAL MODE (existing app flow) ─────────────────
-# From here down is your existing AD/Store/Segment-aware UI (unchanged from 1.8.4)
-
-# Build rows
 rows = []
 for ad, stores in raw_data.items():
     for store, sections in stores.items():
@@ -872,7 +871,6 @@ if df.empty:
     st.warning("No matching reasons found for the selected period.")
     st.stop()
 
-# For export only (not displayed)
 store_totals = (
     df.groupby(["Area Director","Store"], as_index=False)["Value"].sum()
       .rename(columns={"Value":"Store Total"})
@@ -884,7 +882,6 @@ ad_totals = (
 df_detail = df.merge(store_totals, on=["Area Director","Store"], how="left") \
               .merge(ad_totals, on="Area Director", how="left")
 
-# Category mapping
 CATEGORY_TOGO_MISSING = "To-go Missing Complaints"
 CATEGORY_ATTITUDE     = "Attitude"
 CATEGORY_OTHER        = "Other"
@@ -893,7 +890,6 @@ CATEGORY_MAP.update({r: CATEGORY_ATTITUDE for r in ATTITUDE_REASONS})
 CATEGORY_MAP.update({r: CATEGORY_OTHER for r in OTHER_REASONS})
 df["Category"] = df["Reason"].map(CATEGORY_MAP).fillna("Unassigned")
 
-# Quick glance vs previous
 st.markdown("### Quick glance")
 try:
     cur_idx = ordered_headers.index(sel_col)
@@ -1121,18 +1117,10 @@ with pd.ExcelWriter(qa, engine="openpyxl") as writer:
         pd.DataFrame(debug_log.get("ignored_tokens", [])).to_excel(writer, index=False, sheet_name="Ignored Tokens")
         hb = debug_log.get("header_bins", [])
         if hb:
+            # FIX: handle dict-shaped bins consistently
             rows = []
             for rec in hb:
-                page = rec["page"]
-                total_x = rec["total_x"]
-                for b in rec["bins"]:
-                    rows.append({
-                        "page": page,
-                        "period": b["period"],
-                        "left": round(b[1],1),
-                        "right": round(b[2],1),
-                        "total_x": round(total_x,1) if total_x is not None else None,
-                    })
+                rows.extend(_dbg_bins_to_rows(rec))
             pd.DataFrame(rows).to_excel(writer, index=False, sheet_name="Header Bins")
 st.download_button(
     "📥 Download QA Workbook (Audit + Facts)",

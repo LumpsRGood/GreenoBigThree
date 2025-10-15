@@ -448,10 +448,13 @@ def parse_pdf_deep_stitch_counts(file_bytes: bytes, debug: bool = False):
             # stitch result for this page
             lines = stitched_pages[page.page_number - 1]
             if debug:
-                # keep a preview (first 12 rows) of stitched text per page
-                preview = [{"page": page.page_number, "text": L["text"]} for L in lines[:12]]
-                debug_log["stitched_preview"].extend(preview)
-
+    # keep *all* stitched lines (full debug visibility)
+    for L in lines:
+        debug_log["stitched_preview"].append({
+            "page": page.page_number,
+            "y": L["y"],
+            "text": L["text"]
+        })
             if not lines:
                 continue
 

@@ -5,6 +5,7 @@ import os
 
 # --- Configuration and Constants ---
 # The columns we expect based on the data structure
+FILE_ID_KEY = "uploaded:R781424.pdf" # Key corresponding to the uploaded file ID
 PERIOD_COLUMNS = [f"P{i} 24" for i in range(9, 13)] + [f"P{i} 25" for i in range(1, 10)]
 TOTAL_COLUMN = "Total"
 COLUMNS_TO_DISPLAY = ["Restaurant", "Visit Type", "Reason for Contact", "Total Count"]
@@ -140,7 +141,8 @@ if __name__ == "__main__":
     import inspect
     
     # Corrected the function name from 'parse_pdf_text_to_dataframe' to 'parse_raw_text'
-    full_code = inspect.getsource(parse_raw_text) 
+    # We comment out the inspect call to avoid unnecessary environment complexity and errors.
+    # full_code = inspect.getsource(parse_raw_text) 
     
     # We must explicitly look for the raw content key set by the initial fetch tool.
     if FILE_ID_KEY in os.environ and os.environ.get('DATA_SOURCE_PATH') == FILE_ID_KEY:

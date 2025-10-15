@@ -61,43 +61,45 @@ def extract_pdf_tables(uploaded_file):
     final_df = pd.concat(all_data, ignore_index=True)
     return final_df
 
-# --- 3. Data Cleaning and Aggregation Function ---
+# --- 3. Data Cleaning and Aggregation Function (Revised Loop) ---
 def clean_and_aggregate_data(raw_df):
-    """
-    Locates target columns robustly, uses numeric validation to find data rows,
-    filters by exact metric, and performs final calculations.
-    """
     
-    # Clean up column values by stripping whitespace and converting to string
+    # ... (Lines before the loop remain the same)
     raw_df = raw_df.applymap(lambda x: str(x).strip() if x is not None else None)
     
     # --- Robust Column Index Mapping ---
     p9_col_index = None
     reason_col_index = None
 
-    HEADER_SCAN_ROWS = 5 # Scan the first 5 rows for header names
+    HEADER_SCAN_ROWS = 5 
     
-    for col in raw_df.columns:
-        if col > 15: 
+    # Iterate using the column index (i) and the column label (label)
+    for i, label in enumerate(raw_df.columns):
+        
+        # Use the index 'i' for the comparison that caused the error
+        if i > 15:
             break
             
         header_fragments = [
-            str(raw_df[col].iloc[r]).strip() for r in range(min(HEADER_SCAN_ROWS, len(raw_df)))
+            str(raw_df[label].iloc[r]).strip() for r in range(min(HEADER_SCAN_ROWS, len(raw_df)))
         ]
         header_text = " ".join(filter(None, header_fragments)).upper()
 
-        # Identify the P9 25 column index
+        # Identify the P9 25 column index (use the label for data access, save the label/index)
         if p9_col_index is None and re.search(r'P9\s*25|P8\s*25|TOTAL', header_text, re.IGNORECASE):
-            if raw_df[col].astype(str).str.isnumeric().any():
-                p9_col_index = col
+            # Also ensure this column contains *some* numbers
+            if raw_df[label].astype(str).str.isnumeric().any():
+                p9_col_index = label # Save the column label/name
         
         # Identify the Reason for Contact column index
         if reason_col_index is None and re.search(r'REASON|COLD|MISSING|UNPROFESSIONAL', header_text, re.IGNORECASE):
-            reason_col_index = col
+            reason_col_index = label # Save the column label/name
             
     # Fallback for Reason column
     if reason_col_index is None:
         reason_col_index = 0 
+        
+    # ... (rest of the function, which uses reason_col_index and p9_col_index)
         
     if p9_col_index is None:
         st.error("Could not reliably locate the 'P9 25' count column. Cannot proceed.")

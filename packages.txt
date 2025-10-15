@@ -1,4 +1,3 @@
-openjdk-17-jre-headless
-ghostscript
-poppler-utils
-tesseract-ocr
+# packages.txt
+openjdk-17-jdk  # Required for tabula-py (which wraps tabula-java)
+ghostscript     # Required for camelot-py's computer vision functionality

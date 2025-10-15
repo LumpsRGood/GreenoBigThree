@@ -4,18 +4,27 @@ import pdfplumber
 import io
 import re
 
-# --- Core PDF Extraction Function ---
+# --- 1. Configuration ---
+# Define the exact metric names you want to filter for (based on your screenshot)
+TARGET_METRICS = [
+    "Cold Food",
+    "Long Hold/No Answer/Hung Up",
+    "Missing Condiments",
+    "Missing Item (Food)",
+    "Tough Food",
+    "Unprofessional Behavior"
+]
+
+# --- 2. Core PDF Extraction Function ---
 def extract_pdf_tables_pdfplumber(uploaded_file):
     """Reads PDF data using pdfplumber and combines all extracted tables."""
-    # Read the uploaded file into memory as bytes
     pdf_bytes = uploaded_file.read()
     all_data = []
 
-    # These settings are optimized for finding tables without visible borders
-    # (like the one in your screenshot) based on white space and text alignment.
+    # Settings optimized for finding tables without visible borders
     table_settings = {
-        "vertical_strategy": "text",
-        "horizontal_strategy": "lines",
+        "vertical_strategy": "text",   # Use text boundaries to determine vertical lines
+        "horizontal_strategy": "lines",# Use line boundaries to determine horizontal lines
         "snap_tolerance": 3,
         "text_tolerance": 5,
         "min_words_vertical": 1,
@@ -27,13 +36,12 @@ def extract_pdf_tables_pdfplumber(uploaded_file):
             st.info(f"Processing {len(pdf.pages)} pages...")
             
             for i, page in enumerate(pdf.pages):
-                # Extract tables using custom settings
                 tables = page.extract_tables(table_settings=table_settings)
                 
                 for table_data in tables:
-                    if table_data and len(table_data[0]) > 1: # Ensure table has at least one row and multiple columns
+                    if table_data and len(table_data[0]) > 1:
                         df = pd.DataFrame(table_data)
-                        df['Source_Page'] = i + 1 # Add page number for reference
+                        df['Source_Page'] = i + 1
                         all_data.append(df)
 
     except Exception as e:
@@ -43,69 +51,94 @@ def extract_pdf_tables_pdfplumber(uploaded_file):
     if not all_data:
         return pd.DataFrame({'Status': ['No tables were successfully extracted.']})
     
-    # Concatenate all tables into one raw DataFrame
     final_df = pd.concat(all_data, ignore_index=True)
     return final_df
 
-# --- Data Cleaning and Aggregation Function ---
+# --- 3. Data Cleaning and Aggregation Function ---
 def clean_and_aggregate_data(raw_df):
-    """Locates target columns robustly and performs final calculations."""
+    """Locates target columns robustly, filters by exact metric, and performs final calculations."""
     
     # Clean up column values by stripping whitespace and converting to string
     raw_df = raw_df.applymap(lambda x: str(x).strip() if x is not None else None)
     
-    # --- Robust Column Index Mapping (AVOIDS 'out-of-bounds' error) ---
+    # --- Robust Column Index Mapping ---
     p9_col_index = None
     reason_col_index = None
 
-    # Iterate through columns to find the correct indices based on header text
     for col in raw_df.columns:
-        # Check for 'P9 25' or 'Total' headers in the first few rows (handles multi-row headers)
+        # Check the first few rows for header text
         header_text = "".join(raw_df[col].iloc[0:3].dropna().astype(str))
         
-        # Identify the P9 25 column (must be numeric for aggregation)
-        if re.search(r'P9\s*25|TOTAL', header_text, re.IGNORECASE) and raw_df[col].astype(str).str.isnumeric().any():
+        # Find P9 25 column (by name and ensuring it contains numbers)
+        if re.search(r'P9\s*25', header_text, re.IGNORECASE) and raw_df[col].astype(str).str.isnumeric().any():
             if p9_col_index is None:
                 p9_col_index = col
         
-        # Identify the Reason for Contact column (typically the first non-numeric column)
-        if reason_col_index is None and any('Reason' in s for s in header_text) and not raw_df[col].astype(str).str.isnumeric().any():
+        # Find Reason for Contact column (by name)
+        if reason_col_index is None and any('Reason' in s for s in header_text):
             reason_col_index = col
         
-        # Fallback for the first column (likely 'Reason for Contact')
+        # Fallback: Assume Reason for Contact is the first column if not explicitly found
         if reason_col_index is None and col == 0:
             reason_col_index = col
 
     if p9_col_index is None or reason_col_index is None:
-        st.error("Could not reliably locate 'Reason' or 'P9 25' columns. Check raw data.")
+        st.error("Could not reliably locate 'Reason' or 'P9 25' columns. Check raw output.")
         return None, 0
 
     # 1. Slice and Rename
     processed_df = raw_df[[reason_col_index, p9_col_index]].copy()
     processed_df.columns = ['Reason', 'P9_25_Count']
     
-    # 2. Clean Data (Remove header rows and convert to numeric)
-    
-    # Remove rows that are clearly headers or blank (assuming headers are in the first few rows)
-    processed_df = processed_df[~processed_df['Reason'].str.contains(r'Reason|Cold Food|Delivery Total', na=False)].copy()
-
-    # Convert counts to numeric (coerces non-numeric entries like headers to NaN)
+    # 2. Convert counts to numeric
     processed_df['P9_25_Count'] = pd.to_numeric(processed_df['P9_25_Count'], errors='coerce')
     
-    # Final cleanup of blank rows and rows with NaN counts
-    processed_df.dropna(subset=['Reason', 'P9_25_Count'], inplace=True)
-    
-    # 3. Calculate total
-    total = processed_df['P9_25_Count'].sum()
-    
-    return processed_df, total
+    # 3. CRITICAL FILTERING STEP: Filter by exact metric wording
+    # This eliminates all scattered and summary rows like "Delivery Total"
+    filtered_df = processed_df[
+        processed_df['Reason'].isin(TARGET_METRICS)
+    ].copy()
 
+    # 4. Final cleanup
+    filtered_df['P9_25_Count'] = filtered_df['P9_25_Count'].fillna(0).astype(int)
+    
+    # 5. Group by Reason (in case a single metric appears on multiple pages)
+    final_metrics_df = filtered_df.groupby('Reason')['P9_25_Count'].sum().reset_index()
+    final_metrics_df.rename(columns={'P9_25_Count': 'P9_25_Occurrences'}, inplace=True)
+    
+    # Calculate total
+    total = final_metrics_df['P9_25_Occurrences'].sum()
+    
+    return final_metrics_df, total
+
+# --- 4. Styling Function for Conditional Formatting ---
+def style_metrics(df):
+    """Applies conditional formatting/styling to highlight non-zero counts."""
+    
+    # Highlight rows where occurrences are greater than 0
+    def highlight_positive(s):
+        is_pos = s['P9_25_Occurrences'] > 0
+        return ['background-color: #e0f2f1' if is_pos else '' for v in s] # Light teal/blue
+
+    # Apply the styling and set general table properties
+    styled_df = df.style.apply(
+        highlight_positive, 
+        axis=1
+    ).set_properties(**{'text-align': 'left'}).set_table_styles([
+        {'selector': 'th', 'props': [('background-color', '#4DB6AC'), ('color', 'white')]}
+    ])
+
+    return styled_df
+
+# =========================================================
 # --- Streamlit Application ---
+# =========================================================
+
 st.set_page_config(page_title="PDF Table Extractor", layout="wide")
 st.title("📄 Free PDF Table Extractor (for Streamlit Cloud)")
-st.markdown("Upload your PDF to extract metrics from tables and calculate the total from the target column.")
+st.markdown("Upload your PDF to **filter by specific metrics** and calculate the total occurrences in the **P9 25** column.")
 
-uploaded_file = st.file_uploader("Upload your PDF file (max ~200MB):", type="pdf")
+uploaded_file = st.file_uploader("Upload your PDF file:", type="pdf")
 
 if uploaded_file:
     if st.button("Extract and Analyze P9 25 Data"):
@@ -113,8 +146,8 @@ if uploaded_file:
         # --- Extraction ---
         raw_df = extract_pdf_tables_pdfplumber(uploaded_file)
         
-        if raw_df is not None:
-            st.subheader("Raw Extracted Data (for debugging)")
+        if raw_df is not None and not raw_df.empty:
+            st.subheader("Raw Extracted Data Preview (for debugging)")
             st.dataframe(raw_df.head(10))
 
             # --- Cleaning and Aggregation ---
@@ -124,14 +157,17 @@ if uploaded_file:
             if processed_df is not None:
                 st.success(f"✅ Extraction Complete! Total Occurrences in P9 25: **{int(total)}**")
                 
-                # Filter for metrics with positive counts
-                metrics_df = processed_df[processed_df['P9_25_Count'] > 0].sort_values(by='P9_25_Count', ascending=False)
+                # Sort the metrics DataFrame before displaying
+                sorted_metrics_df = processed_df.sort_values(by='P9_25_Occurrences', ascending=False)
                 
-                st.subheader("Results: Sorted Metrics from P9 25 Column")
-                st.dataframe(metrics_df, use_container_width=True)
+                st.subheader("Results: Filtered & Styled Metrics")
+                
+                # Display the styled DataFrame
+                styled_table = style_metrics(sorted_metrics_df)
+                st.dataframe(styled_table, use_container_width=True)
 
                 # --- Download Button ---
-                csv = metrics_df.to_csv(index=False).encode('utf-8')
+                csv = sorted_metrics_df.to_csv(index=False).encode('utf-8')
                 st.download_button(
                     label="⬇️ Download Processed Metrics as CSV",
                     data=csv,

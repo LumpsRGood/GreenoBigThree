@@ -138,7 +138,9 @@ if __name__ == "__main__":
     
     # Extract the raw text from the code environment's snippet access
     import inspect
-    full_code = inspect.getsource(parse_pdf_text_to_dataframe)
+    
+    # Corrected the function name from 'parse_pdf_text_to_dataframe' to 'parse_raw_text'
+    full_code = inspect.getsource(parse_raw_text) 
     
     # We must explicitly look for the raw content key set by the initial fetch tool.
     if FILE_ID_KEY in os.environ and os.environ.get('DATA_SOURCE_PATH') == FILE_ID_KEY:

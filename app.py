@@ -78,7 +78,8 @@ def clean_and_aggregate_data(raw_df):
     HEADER_SCAN_ROWS = 5 # Scan the first 5 rows for header names
     
     for col in raw_df.columns:
-        if col > 15: break 
+        if col > 15: 
+            break
             
         header_fragments = [
             str(raw_df[col].iloc[r]).strip() for r in range(min(HEADER_SCAN_ROWS, len(raw_df)))

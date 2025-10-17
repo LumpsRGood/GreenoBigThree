@@ -38,7 +38,7 @@ DEFAULT_MAPPING_JSON = r"""
   "metrics": [
     {
       "label": "Missing food",
-      "patterns": ["Item \\(Food\\)"],   // substring match via regex
+      "patterns": ["Item \\(Food\\)"],
       "regex": true,
       "sections": ["To-Go", "Dine-In", "Delivery"],
       "section_aggregate": "by_section"

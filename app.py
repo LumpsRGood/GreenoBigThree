@@ -1,5 +1,5 @@
 # path: app.py
-# Streamlit: PDF → CSV with metric mapping (labels + sections). Ready for Streamlit Cloud.
+# Streamlit: PDF → CSV with metric mapping, now with "latest period only" output.
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ import streamlit as st
 # ----- Page config -----
 st.set_page_config(page_title="PDF → CSV (Metric Mapping)", page_icon="📄", layout="wide")
 
-# ----- Optional OCR (not required; you can ignore) -----
+# ----- Optional OCR (not required) -----
 try:
     import pytesseract
     _HAS_TESSERACT = True
@@ -31,7 +31,7 @@ except Exception:
     st.error("Missing dependency: pdfplumber. Add `pdfplumber` to requirements.txt.")
     st.stop()
 
-# ----- Your 21-metric Mapping JSON (as a string) -----
+# ----- Your 21-metric Mapping JSON (string) -----
 DEFAULT_MAPPING_JSON = r"""
 {
   "case_insensitive": true,
@@ -85,7 +85,7 @@ def extract_pdf_text(file: io.BytesIO, use_ocr: bool) -> Tuple[str, List[str]]:
             if use_ocr:
                 try:
                     img = page.to_image(resolution=300).original
-                    txt = pytesseract.image_to_string(img)
+                    txt = pytesseract.image_to_string(img)  # why: image-only PDFs
                 except Exception as e:
                     st.warning(f"OCR failed; using native text. ({e})")
                     txt = page.extract_text(layout=True) or ""
@@ -98,7 +98,7 @@ def normalize_text(s: str, cfg: ExtractConfig) -> str:
     if cfg.normalize_unicode:
         s = unicodedata.normalize("NFKC", s)
     if cfg.hyphenation_fix:
-        s = re.sub(r"(\w)-\n(\w)", r"\1\2", s)
+        s = re.sub(r"(\w)-\n(\w)", r"\1\2", s)  # join wrapped words (why: line-break hyphenation)
     s = s.replace("\r\n", "\n").replace("\r", "\n")
     if cfg.collapse_whitespace:
         s = "\n".join(re.sub(r"[ \t]+", " ", ln) for ln in s.split("\n"))
@@ -166,12 +166,14 @@ def parse_matrix_blocks(text: str, ncols: int = 14) -> Tuple[pd.DataFrame, List[
     section: Optional[str] = None
     for raw in text.splitlines():
         ln = raw.strip()
-        if not ln: continue
+        if not ln:
+            continue
         if ln.lower() in SECTION_ALIASES:
             section = norm_section(ln)
             continue
         m = pat.match(ln)
-        if not m: continue
+        if not m:
+            continue
         gd = m.groupdict()
         metric_name = gd.pop("metric").rstrip(":").strip()
         vals = [gd[f"c{i:02d}"] for i in range(1, ncols + 1)]
@@ -214,7 +216,7 @@ def section_allowed(section: Optional[str], rule: Dict[str, Any]) -> bool:
     canon = set(norm_section(s) for s in allowed)
     return sec in canon
 
-# >>> FIXED: No groupby([]) when summing across sections <<<
+# >>> FIX: avoid groupby([]) when summing across sections <<<
 def apply_mapping(
     df: pd.DataFrame,
     labels: List[str],
@@ -292,6 +294,27 @@ def to_long(df: pd.DataFrame, id_cols: List[str], value_cols: List[str], include
         long = pd.concat([long, add], ignore_index=True)
     return long.dropna(subset=["count"]).reset_index(drop=True)
 
+# ----- NEW: pick the latest period label -----
+def pick_latest_period_label(labels: List[str]) -> Optional[str]:
+    """
+    Prefer labels like 'P9_24', 'P10_25', ... Choose max by (YY*100 + P).
+    Fallback: last non-'Total' label.
+    """
+    cand = [lab for lab in labels if lab.lower() != "total"]
+    if not cand:
+        return None
+    def key(lbl: str) -> int:
+        m = re.match(r"^P(\d{1,2})_(\d{2})$", lbl)
+        if not m:
+            return -1
+        p = int(m.group(1))
+        y = int(m.group(2))
+        return y * 100 + p
+    scored = [(lbl, key(lbl)) for lbl in cand]
+    if all(k >= 0 for _, k in scored):
+        return max(scored, key=lambda x: x[1])[0]
+    return cand[-1]
+
 # ----- UI -----
 st.title("📄→📊 PDF to CSV — Metric Mapping")
 
@@ -364,16 +387,41 @@ if result_df.empty:
     st.warning("No rows after mapping. Verify patterns and sections.")
     st.stop()
 
-st.markdown("**Step 3 — Review & Export**")
-long_out = st.toggle("Output long (tidy) format", value=False)
-if long_out:
-    ids = ["label"] + (["section"] if "section" in result_df.columns else [])
-    vals = [c for c in labels if c in result_df.columns]
-    long_df = to_long(result_df, id_cols=ids, value_cols=vals, include_recalc=True)
-    st.dataframe(long_df.head(1000), use_container_width=True)
-    st.download_button("⬇️ Download CSV (long)", data=long_df.to_csv(index=False).encode("utf-8"),
-                       file_name="mapped_metrics_long.csv", mime="text/csv", use_container_width=True)
+# ----- NEW: Latest-period-only view -----
+latest_label = pick_latest_period_label(labels)
+show_latest_only = st.toggle("Show only latest period", value=True)
+include_totals = st.toggle("Also include totals (Recalc/PDF)", value=False)
+
+id_cols = ["label"] + (["section"] if "section" in result_df.columns else [])
+
+if show_latest_only and latest_label and latest_label in result_df.columns:
+    cols = id_cols + [latest_label]
+    footer_cols: List[str] = []
+    if include_totals:
+        for c in ["Recalc_Total", "PDF_Total", "Diff"]:
+            if c in result_df.columns:
+                footer_cols.append(c)
+    cols += footer_cols
+    latest_df = result_df[cols].copy()
+    st.info(f"Latest period detected: **{latest_label}**")
+    st.dataframe(latest_df.head(1000), use_container_width=True)
+    st.download_button(
+        f"⬇️ Download CSV (latest: {latest_label})",
+        data=latest_df.to_csv(index=False).encode("utf-8"),
+        file_name=f"mapped_metrics_{latest_label}.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
 else:
-    st.dataframe(result_df.head(1000), use_container_width=True)
-    st.download_button("⬇️ Download CSV (wide)", data=result_df.to_csv(index=False).encode("utf-8"),
-                       file_name="mapped_metrics_wide.csv", mime="text/csv", use_container_width=True)
+    # Full table with optional long output
+    long_out = st.toggle("Output long (tidy) format", value=False)
+    if long_out:
+        vals = [c for c in labels if c in result_df.columns]
+        long_df = to_long(result_df, id_cols=id_cols, value_cols=vals, include_recalc=True)
+        st.dataframe(long_df.head(1000), use_container_width=True)
+        st.download_button("⬇️ Download CSV (long)", data=long_df.to_csv(index=False).encode("utf-8"),
+                           file_name="mapped_metrics_long.csv", mime="text/csv", use_container_width=True)
+    else:
+        st.dataframe(result_df.head(1000), use_container_width=True)
+        st.download_button("⬇️ Download CSV (wide)", data=result_df.to_csv(index=False).encode("utf-8"),
+                           file_name="mapped_metrics_wide.csv", mime="text/csv", use_container_width=True)

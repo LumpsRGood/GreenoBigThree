@@ -1,5 +1,1 @@
-#path: packages.txt
 tesseract-ocr
-#poppler-utils   # only if you switch to pdf2image
-#ghostscript     # rare cases; not usually needed
-#imagemagick     # avoid unless you know you need it; PDF may be blocked by policy

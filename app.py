@@ -3,7 +3,8 @@
 #  - Missing food (To-Go, Dine-In, Delivery) — sum
 #  - Order wrong (To-Go, Delivery) — sum
 #  - Missing condiments (To-Go, Delivery) — sum
-# With per-page debug that carries section forward across pages (why: some pages omit repeating the section header).
+#  - Out of menu item (To-Go, Delivery) — sum
+# Per-page debug uses section carry-forward across page breaks.
 
 from __future__ import annotations
 
@@ -20,7 +21,7 @@ import streamlit as st
 
 st.set_page_config(page_title="PDF → CSV — Metric totals + per-page debug", page_icon="📄", layout="wide")
 
-# Optional OCR (kept for image-only PDFs)
+# Optional OCR
 try:
     import pytesseract
     _HAS_TESSERACT = True
@@ -34,7 +35,7 @@ except Exception:
     st.error("Missing dependency: pdfplumber. Add `pdfplumber` to requirements.txt.")
     st.stop()
 
-# Mapping rules (JSON; no comments)
+# -------- Mapping rules (JSON; no comments) --------
 DEFAULT_MAPPING_JSON = r"""
 {
   "case_insensitive": true,
@@ -59,12 +60,19 @@ DEFAULT_MAPPING_JSON = r"""
       "regex": false,
       "sections": ["To-Go", "Delivery"],
       "section_aggregate": "sum"
+    },
+    {
+      "label": "Out of menu item",
+      "patterns": ["Out Of Menu Item"],
+      "regex": false,
+      "sections": ["To-Go", "Delivery"],
+      "section_aggregate": "sum"
     }
   ]
 }
 """
 
-# ---------- extraction / cleaning ----------
+# -------- Extraction / Cleaning --------
 @dataclass
 class ExtractConfig:
     use_ocr: bool = False
@@ -99,8 +107,7 @@ def normalize_text(s: str, cfg: ExtractConfig) -> str:
     if cfg.normalize_unicode:
         s = unicodedata.normalize("NFKC", s)
     if cfg.hyphenation_fix:
-        # why: join words split across line breaks
-        s = re.sub(r"(\w)-\n(\w)", r"\1\2", s)
+        s = re.sub(r"(\w)-\n(\w)", r"\1\2", s)  # join broken words
     s = s.replace("\r\n", "\n").replace("\r", "\n")
     if cfg.collapse_whitespace:
         s = "\n".join(re.sub(r"[ \t]+", " ", ln) for ln in s.split("\n"))
@@ -124,14 +131,12 @@ def remove_page_numbers(text: str) -> str:
     keep = []
     for ln in text.split("\n"):
         t = ln.strip()
-        if re.fullmatch(r"Page\s+\d+(?:\s*/\s*\d+)?", t, flags=re.I):
-            continue
-        if re.fullmatch(r"\d{1,4}", t):
-            continue
+        if re.fullmatch(r"Page\s+\d+(?:\s*/\s*\d+)?", t, flags=re.I): continue
+        if re.fullmatch(r"\d{1,4}", t): continue
         keep.append(ln)
     return "\n".join(keep)
 
-# ---------- parser ----------
+# -------- Parser --------
 SECTION_ALIASES = {
     "delivery": "Delivery",
     "dine in": "Dine-In",
@@ -144,8 +149,7 @@ SECTION_ALIASES = {
 }
 def norm_section(s: Optional[str]) -> Optional[str]:
     if s is None: return None
-    k = s.strip().lower()
-    return SECTION_ALIASES.get(k, s.strip())
+    return SECTION_ALIASES.get(s.strip().lower(), s.strip())
 
 def extract_period_labels(text: str, expected: int = 14) -> List[str]:
     for ln in text.splitlines():
@@ -187,7 +191,7 @@ def parse_matrix_blocks(text: str, ncols: int = 14) -> Tuple[pd.DataFrame, List[
         df = df[["section", "metric"] + labels]
     return df, labels
 
-# ---------- mapping / aggregation ----------
+# -------- Mapping / Aggregation --------
 def load_mapping(text: str) -> Dict[str, Any]:
     try:
         cfg = json.loads(text) if text.strip() else {"metrics": []}
@@ -238,13 +242,11 @@ def apply_mapping(df: pd.DataFrame, labels: List[str], mapping: Dict[str, Any]) 
             agg.insert(0, "label", label)
         else:
             totals = matched[use_cols].sum(min_count=1)
-            agg = pd.DataFrame([totals])
-            agg.insert(0, "label", label)
+            agg = pd.DataFrame([totals]); agg.insert(0, "label", label)
         period_cols = [c for c in use_cols if c.lower() != "total"]
         agg["Recalc_Total"] = agg[period_cols].sum(axis=1, min_count=1)
         if "Total" in use_cols:
-            agg["PDF_Total"] = agg["Total"]
-            agg["Diff"] = agg["Recalc_Total"] - agg["PDF_Total"]
+            agg["PDF_Total"] = agg["Total"]; agg["Diff"] = agg["Recalc_Total"] - agg["PDF_Total"]
         outputs.append(agg)
     if not outputs:
         return pd.DataFrame(columns=["label"] + labels + ["Recalc_Total"]), diags
@@ -264,11 +266,10 @@ def pick_latest_period_label(labels: List[str]) -> Optional[str]:
         p = int(m.group(1)); y = int(m.group(2))
         return y * 100 + p
     scored = [(lbl, key(lbl)) for lbl in cand]
-    if all(k >= 0 for _, k in scored):
-        return max(scored, key=lambda x: x[1])[0]
+    if all(k >= 0 for _, k in scored): return max(scored, key=lambda x: x[1])[0]
     return cand[-1]
 
-# ---------- per-page debug (with section carry-forward) ----------
+# -------- Per-page debug (section carry-forward) --------
 def per_page_totals_for_metric(
     pdf_bytes: io.BytesIO,
     labels: List[str],
@@ -277,17 +278,12 @@ def per_page_totals_for_metric(
     allowed_sections: List[str],
     carry_forward_sections: bool = True,
 ) -> pd.DataFrame:
-    """
-    Sum target_label per page for lines whose metric matches `pattern_regex`
-    and whose section is in allowed_sections. If carry_forward_sections=True,
-    the last seen section is reused across page breaks (why: PDFs often omit repeating the header).
-    """
     allowed = set(norm_section(s) for s in allowed_sections) if allowed_sections else None
     pages_totals: Dict[int, int] = {}
     pat_line = metric_line_pattern(ncols=14)
 
     with pdfplumber.open(pdf_bytes) as pdf:
-        section = None  # carry-forward across pages when enabled
+        section = None
         for page_idx, page in enumerate(pdf.pages, start=1):
             if not carry_forward_sections:
                 section = None
@@ -295,19 +291,14 @@ def per_page_totals_for_metric(
             lines = [unicodedata.normalize("NFKC", ln) for ln in txt.splitlines()]
             for raw in lines:
                 ln = re.sub(r"[ \t]+", " ", raw.strip())
-                if not ln:
-                    continue
+                if not ln: continue
                 if ln.lower() in SECTION_ALIASES or ln in {"Delivery","Dine-In","Dine In","To-Go","To Go","Carryout","Carry Out","Takeout"}:
-                    section = norm_section(ln)
-                    continue
+                    section = norm_section(ln); continue
                 m = pat_line.match(ln)
-                if not m:
-                    continue
-                if allowed and section not in allowed:
-                    continue
+                if not m: continue
+                if allowed and section not in allowed: continue
                 metric_name = m.group("metric").rstrip(":").strip()
-                if not re.search(pattern_regex, metric_name, flags=re.I):
-                    continue
+                if not re.search(pattern_regex, metric_name, flags=re.I): continue
                 vals = [m.group(f"c{i:02d}") for i in range(1, 14 + 1)]
                 if target_label in labels:
                     idx = labels.index(target_label)
@@ -316,11 +307,10 @@ def per_page_totals_for_metric(
                     if cnt:
                         pages_totals[page_idx] = pages_totals.get(page_idx, 0) + cnt
 
-    if not pages_totals:
-        return pd.DataFrame(columns=["page","total"])
+    if not pages_totals: return pd.DataFrame(columns=["page","total"])
     return pd.DataFrame(sorted(pages_totals.items()), columns=["page","total"])
 
-# ---------- UI ----------
+# -------- UI --------
 st.title("📄→📊 Metric totals (latest period) + per-page debug")
 
 with st.sidebar:
@@ -336,7 +326,6 @@ with st.sidebar:
     cfg.drop_header_lines = st.number_input("Drop header lines per page", 0, 50, value=cfg.drop_header_lines)
     cfg.drop_footer_lines = st.number_input("Drop footer lines per page", 0, 50, value=cfg.drop_footer_lines)
     cfg.remove_page_numbers = st.checkbox("Remove page number lines", value=cfg.remove_page_numbers)
-
     st.subheader("OCR health check")
     try:
         t_path = shutil.which("tesseract")
@@ -349,11 +338,10 @@ with st.sidebar:
 st.markdown("**Step 1 — Upload PDF**")
 pdf_file = st.file_uploader("Choose a PDF", type=["pdf"])
 if not pdf_file:
-    st.info("Upload a PDF to begin.")
-    st.stop()
+    st.info("Upload a PDF to begin."); st.stop()
 
 st.markdown("**Step 2 — Mapping JSON**")
-mapping_text = st.text_area("Mapping JSON", value=DEFAULT_MAPPING_JSON, height=260)
+mapping_text = st.text_area("Mapping JSON", value=DEFAULT_MAPPING_JSON, height=320)
 
 # Extract + clean
 pdf_bytes = io.BytesIO(pdf_file.read())
@@ -361,8 +349,7 @@ with st.spinner("Extracting text..."):
     raw_text, _pages = extract_pdf_text(pdf_bytes, use_ocr=cfg.use_ocr)
 
 txt = strip_headers_footers(raw_text, cfg)
-if cfg.remove_page_numbers:
-    txt = remove_page_numbers(txt)
+if cfg.remove_page_numbers: txt = remove_page_numbers(txt)
 txt = normalize_text(txt, cfg)
 
 # Parse → labels
@@ -374,8 +361,7 @@ if df_wide.empty:
 
 latest_label = pick_latest_period_label(labels)
 if not latest_label:
-    st.error("Could not detect period labels.")
-    st.stop()
+    st.error("Could not detect period labels."); st.stop()
 st.success(f"Detected period columns: {', '.join(labels)} • Latest: **{latest_label}**")
 
 # Apply mapping
@@ -396,8 +382,7 @@ for label in available_labels:
     st.subheader(f"{label} — total ({latest_label})")
 
     if label not in result_df["label"].values:
-        st.info("No matches for this metric in the PDF.")
-        continue
+        st.info("No matches for this metric in the PDF."); continue
 
     total_value = int(result_df.loc[result_df["label"] == label, latest_label].sum())
     st.metric(label=f"{label} — {latest_label}", value=total_value)
@@ -414,9 +399,7 @@ for label in available_labels:
     rule = label_to_rule[label]
     patterns = rule.get("patterns", [])
     regex = bool(rule.get("regex", False))
-    if not patterns:
-        continue
-    # Combined regex
+    if not patterns: continue
     pat_regex = "|".join(f"(?:{p})" for p in patterns) if regex else "|".join(re.escape(p) for p in patterns)
 
     allowed_sections = rule.get("sections", ["*"])
@@ -431,7 +414,7 @@ for label in available_labels:
                 target_label=latest_label,
                 pattern_regex=pat_regex,
                 allowed_sections=allowed_sections,
-                carry_forward_sections=True,  # important: avoid missing pages when header omitted
+                carry_forward_sections=True,  # critical for cross-page section continuity
             )
         if page_totals.empty:
             st.info("No pages with non-zero totals for the latest period.")

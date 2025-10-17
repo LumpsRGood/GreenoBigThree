@@ -1,5 +1,5 @@
 # path: app.py
-# Streamlit: PDF -> CSV with metric mapping (labels + sections), ready for Streamlit Cloud.
+# Streamlit: PDF → CSV with metric mapping (labels + sections). Ready for Streamlit Cloud.
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ import streamlit as st
 # ----- Page config -----
 st.set_page_config(page_title="PDF → CSV (Metric Mapping)", page_icon="📄", layout="wide")
 
-# ----- Optional OCR (why: image-only PDFs) -----
+# ----- Optional OCR (not required; you can ignore) -----
 try:
     import pytesseract
     _HAS_TESSERACT = True
@@ -31,7 +31,7 @@ except Exception:
     st.error("Missing dependency: pdfplumber. Add `pdfplumber` to requirements.txt.")
     st.stop()
 
-# ----- Default Mapping JSON (paste your rules here) -----
+# ----- Your 21-metric Mapping JSON (as a string) -----
 DEFAULT_MAPPING_JSON = r"""
 {
   "case_insensitive": true,
@@ -63,7 +63,7 @@ DEFAULT_MAPPING_JSON = r"""
 }
 """
 
-# ----- Config -----
+# ----- Extraction / Cleaning -----
 @dataclass
 class ExtractConfig:
     use_ocr: bool = False
@@ -75,7 +75,6 @@ class ExtractConfig:
     drop_footer_lines: int = 0
     remove_page_numbers: bool = True
 
-# ----- Extraction / Cleaning -----
 def extract_pdf_text(file: io.BytesIO, use_ocr: bool) -> Tuple[str, List[str]]:
     if use_ocr and not _HAS_TESSERACT:
         st.warning("OCR selected but pytesseract is unavailable; using native text.")
@@ -99,7 +98,7 @@ def normalize_text(s: str, cfg: ExtractConfig) -> str:
     if cfg.normalize_unicode:
         s = unicodedata.normalize("NFKC", s)
     if cfg.hyphenation_fix:
-        s = re.sub(r"(\w)-\n(\w)", r"\1\2", s)  # join wrapped words
+        s = re.sub(r"(\w)-\n(\w)", r"\1\2", s)
     s = s.replace("\r\n", "\n").replace("\r", "\n")
     if cfg.collapse_whitespace:
         s = "\n".join(re.sub(r"[ \t]+", " ", ln) for ln in s.split("\n"))
@@ -167,14 +166,12 @@ def parse_matrix_blocks(text: str, ncols: int = 14) -> Tuple[pd.DataFrame, List[
     section: Optional[str] = None
     for raw in text.splitlines():
         ln = raw.strip()
-        if not ln:
-            continue
+        if not ln: continue
         if ln.lower() in SECTION_ALIASES:
             section = norm_section(ln)
             continue
         m = pat.match(ln)
-        if not m:
-            continue
+        if not m: continue
         gd = m.groupdict()
         metric_name = gd.pop("metric").rstrip(":").strip()
         vals = [gd[f"c{i:02d}"] for i in range(1, ncols + 1)]
@@ -217,39 +214,72 @@ def section_allowed(section: Optional[str], rule: Dict[str, Any]) -> bool:
     canon = set(norm_section(s) for s in allowed)
     return sec in canon
 
-def apply_mapping(df: pd.DataFrame, labels: List[str], mapping: Dict[str, Any]) -> Tuple[pd.DataFrame, List[Dict[str, Any]]]:
+# >>> FIXED: No groupby([]) when summing across sections <<<
+def apply_mapping(
+    df: pd.DataFrame,
+    labels: List[str],
+    mapping: Dict[str, Any]
+) -> Tuple[pd.DataFrame, List[Dict[str, Any]]]:
     diags: List[Dict[str, Any]] = []
-    if df.empty: return df, diags
-    ci_default = bool(mapping.get("case_insensitive", False))
-    # ensure numeric
+    if df.empty:
+        return df, diags
+
+    # ensure numeric period columns
     for lab in labels:
         if lab in df.columns:
             df[lab] = pd.to_numeric(df[lab], errors="coerce")
+
+    ci_default = bool(mapping.get("case_insensitive", False))
     outputs: List[pd.DataFrame] = []
+
     for idx, rule in enumerate(mapping.get("metrics", []), start=1):
         label = rule.get("label", f"Rule {idx}")
-        by = (rule.get("section_aggregate") or "sum").lower()
-        mask = df.apply(lambda r: match_metric(r["metric"], rule, ci_default) and section_allowed(r["section"], rule), axis=1)
+        agg_mode = (rule.get("section_aggregate") or "sum").lower()
+
+        mask = df.apply(
+            lambda r: match_metric(r["metric"], rule, ci_default) and section_allowed(r["section"], rule),
+            axis=1,
+        )
         matched = df[mask].copy()
         diags.append({"label": label, "matched_rows": int(matched.shape[0])})
         if matched.empty:
             continue
-        group_keys: List[str] = [] if by == "sum" else ["section"]
-        agg = matched.groupby(group_keys)[labels].sum(min_count=1).reset_index()
-        agg.insert(0, "label", label)
-        period_cols = [c for c in labels if c.lower() != "total"]
+
+        use_cols = [c for c in labels if c in matched.columns]
+
+        if agg_mode == "by_section":
+            agg = (
+                matched.groupby(["section"], dropna=False)[use_cols]
+                .sum(min_count=1)
+                .reset_index()
+            )
+            agg.insert(0, "label", label)
+        else:
+            totals = matched[use_cols].sum(min_count=1)
+            agg = pd.DataFrame([totals])
+            agg.insert(0, "label", label)
+
+        period_cols = [c for c in use_cols if c.lower() != "total"]
         agg["Recalc_Total"] = agg[period_cols].sum(axis=1, min_count=1)
-        if "Total" in labels:
+        if "Total" in use_cols:
             agg["PDF_Total"] = agg["Total"]
             agg["Diff"] = agg["Recalc_Total"] - agg["PDF_Total"]
+
         outputs.append(agg)
+
     if not outputs:
-        cols = ["label"] + (["section"] if any(r.get("section_aggregate") == "by_section" for r in mapping.get("metrics", [])) else [])
-        return pd.DataFrame(columns=cols + labels + ["Recalc_Total"]), diags
+        id_cols = ["label"]
+        if any((r.get("section_aggregate") or "sum").lower() == "by_section" for r in mapping.get("metrics", [])):
+            id_cols.append("section")
+        empty_cols = id_cols + [c for c in labels] + ["Recalc_Total"]
+        return pd.DataFrame(columns=empty_cols), diags
+
     out = pd.concat(outputs, ignore_index=True)
+
     id_cols = ["label"] + (["section"] if "section" in out.columns else [])
     value_cols = [c for c in out.columns if c not in id_cols]
     out = out.groupby(id_cols, dropna=False)[value_cols].sum(min_count=1).reset_index()
+
     ordered = id_cols + [c for c in labels if c in out.columns] + [c for c in ["Recalc_Total", "PDF_Total", "Diff"] if c in out.columns]
     return out[ordered], diags
 
@@ -295,7 +325,7 @@ if not pdf_file:
     st.info("Upload a PDF to begin.")
     st.stop()
 
-st.markdown("**Step 2 — Mapping JSON (you can edit rules here)**")
+st.markdown("**Step 2 — Mapping JSON (edit if needed)**")
 mapping_text = st.text_area("Mapping JSON", value=DEFAULT_MAPPING_JSON, height=260)
 
 # Extract + clean
@@ -317,7 +347,7 @@ with st.spinner("Parsing matrix..."):
     df_wide, labels = parse_matrix_blocks(txt, ncols=14)
 
 if df_wide.empty:
-    st.error("No matrix rows matched. Ensure header contains 'Reason for Contact' and metric lines end with 14 numbers.")
+    st.error("No matrix rows matched. Ensure header includes 'Reason for Contact' and rows end with 14 numbers.")
     st.stop()
 
 st.success(f"Detected period columns: {', '.join(labels)}")
@@ -331,7 +361,7 @@ with st.expander("Diagnostics", expanded=False):
     st.write(pd.DataFrame(diags))
 
 if result_df.empty:
-    st.warning("No rows after mapping. Verify rule patterns and segments.")
+    st.warning("No rows after mapping. Verify patterns and sections.")
     st.stop()
 
 st.markdown("**Step 3 — Review & Export**")

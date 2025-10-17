@@ -1,5 +1,5 @@
 # path: app.py
-# Streamlit: PDF → CSV — "Missing food" total (sum across sections) + per-page debug.
+# Streamlit: PDF → CSV — Totals for "Missing food" and "Order wrong" + per-page debug.
 
 from __future__ import annotations
 
@@ -15,24 +15,23 @@ import pandas as pd
 import streamlit as st
 
 # --- Page ---
-st.set_page_config(page_title="PDF → CSV — Missing food (Total + Debug)", page_icon="📄", layout="wide")
+st.set_page_config(page_title="PDF → CSV — Totals + Per-page Debug", page_icon="📄", layout="wide")
 
-# --- Optional OCR (not required; kept for image-only PDFs) ---
+# Optional OCR (why: image-only PDFs)
 try:
     import pytesseract
     _HAS_TESSERACT = True
 except Exception:
     _HAS_TESSERACT = False
 
-# --- Required PDF text extraction ---
+# Required PDF text extraction
 try:
     import pdfplumber
 except Exception:
     st.error("Missing dependency: pdfplumber. Add `pdfplumber` to requirements.txt.")
     st.stop()
 
-# --- Single-metric mapping (substring via regex search) ---
-# Sum across sections; not separated.
+# --- Mapping JSON: two metrics ---
 DEFAULT_MAPPING_JSON = r"""
 {
   "case_insensitive": true,
@@ -42,6 +41,13 @@ DEFAULT_MAPPING_JSON = r"""
       "patterns": ["Item \\(Food\\)"],
       "regex": true,
       "sections": ["To-Go", "Dine-In", "Delivery"],
+      "section_aggregate": "sum"
+    },
+    {
+      "label": "Order wrong",
+      "patterns": ["Order Wrong"],
+      "regex": false,
+      "sections": ["To-Go", "Delivery"],
       "section_aggregate": "sum"
     }
   ]
@@ -83,7 +89,7 @@ def normalize_text(s: str, cfg: ExtractConfig) -> str:
     if cfg.normalize_unicode:
         s = unicodedata.normalize("NFKC", s)
     if cfg.hyphenation_fix:
-        s = re.sub(r"(\w)-\n(\w)", r"\1\2", s)  # why: join wrapped words
+        s = re.sub(r"(\w)-\n(\w)", r"\1\2", s)  # why: join wrapped words from line breaks
     s = s.replace("\r\n", "\n").replace("\r", "\n")
     if cfg.collapse_whitespace:
         s = "\n".join(re.sub(r"[ \t]+", " ", ln) for ln in s.split("\n"))
@@ -109,12 +115,12 @@ def remove_page_numbers(text: str) -> str:
         t = ln.strip()
         if re.fullmatch(r"Page\s+\d+(?:\s*/\s*\d+)?", t, flags=re.I):
             continue
-        if re.fullmatch(r"\d{1,4}", t):  # standalone page numbers
+        if re.fullmatch(r"\d{1,4}", t):
             continue
         keep.append(ln)
     return "\n".join(keep)
 
-# --- Matrix parser (Reason for Contact … P# YY … Total) ---
+# --- Matrix parser ---
 SECTION_ALIASES = {
     "delivery": "Delivery",
     "dine in": "Dine-In",
@@ -188,7 +194,7 @@ def match_metric(name: str, rule: Dict[str, Any], default_ci: bool) -> bool:
     ci = bool(rule.get("case_insensitive", default_ci))
     flags = re.IGNORECASE if ci else 0
     if use_regex:
-        return any(re.search(p, name, flags=flags) for p in pats)  # substring allowed
+        return any(re.search(p, name, flags=flags) for p in pats)  # why: substring-friendly
     return any((p.lower() == name.lower()) if ci else (p == name) for p in pats)
 
 def section_allowed(section: Optional[str], rule: Dict[str, Any]) -> bool:
@@ -209,7 +215,7 @@ def apply_mapping(df: pd.DataFrame, labels: List[str], mapping: Dict[str, Any]) 
     outputs: List[pd.DataFrame] = []
     for idx, rule in enumerate(mapping.get("metrics", []), start=1):
         label = rule.get("label", f"Rule {idx}")
-        agg_mode = (rule.get("section_aggregate") or "sum").lower()  # sum across sections
+        agg_mode = (rule.get("section_aggregate") or "sum").lower()
         mask = df.apply(lambda r: match_metric(r["metric"], rule, ci_default) and section_allowed(r["section"], rule), axis=1)
         matched = df[mask].copy()
         diags.append({"label": label, "matched_rows": int(matched.shape[0])})
@@ -251,16 +257,15 @@ def pick_latest_period_label(labels: List[str]) -> Optional[str]:
         return max(scored, key=lambda x: x[1])[0]
     return cand[-1]
 
-# --- Per-page debug (sum of counts per page for the target period) ---
-def per_page_totals_for_metric(pdf_bytes: io.BytesIO, labels: List[str], target_label: str, pattern_regex: str) -> pd.DataFrame:
-    """Return DataFrame[page, total] where total is sum of target_label counts for rows whose metric matches pattern."""
+# --- Debug: per-page totals for a given metric/pattern/sections ---
+def per_page_totals_for_metric(pdf_bytes: io.BytesIO, labels: List[str], target_label: str, pattern_regex: str, allowed_sections: List[str]) -> pd.DataFrame:
+    """Return DataFrame[page,total] for rows whose metric matches pattern and whose section is in allowed_sections."""
+    allowed = set(norm_section(s) for s in allowed_sections) if allowed_sections else None
     pages_totals: Dict[int, int] = {}
     pat_line = metric_line_pattern(ncols=14)
-    # Re-open for page-wise parsing (why: we need page indices)
     with pdfplumber.open(pdf_bytes) as pdf:
         for page_idx, page in enumerate(pdf.pages, start=1):
             txt = page.extract_text(layout=True) or ""
-            # light clean
             lines = [unicodedata.normalize("NFKC", ln) for ln in txt.splitlines()]
             section = None
             for raw in lines:
@@ -273,31 +278,31 @@ def per_page_totals_for_metric(pdf_bytes: io.BytesIO, labels: List[str], target_
                 m = pat_line.match(ln)
                 if not m:
                     continue
+                if allowed and section not in allowed:
+                    continue
                 gd = m.groupdict()
                 metric_name = gd.pop("metric").rstrip(":").strip()
                 if not re.search(pattern_regex, metric_name, flags=re.I):
                     continue
                 vals = [gd[f"c{i:02d}"] for i in range(1, 14 + 1)]
-                # Map using global labels order
                 if target_label in labels:
                     idx = labels.index(target_label)
                     v = vals[idx] if idx < len(vals) else None
                     cnt = int(v) if v and v.isdigit() else 0
-                    pages_totals[page_idx] = pages_totals.get(page_idx, 0) + cnt
+                    if cnt:
+                        pages_totals[page_idx] = pages_totals.get(page_idx, 0) + cnt
     if not pages_totals:
         return pd.DataFrame(columns=["page","total"])
-    out = pd.DataFrame(sorted(pages_totals.items()), columns=["page","total"])
-    return out
+    return pd.DataFrame(sorted(pages_totals.items()), columns=["page","total"])
 
 # --- UI ---
-st.title("📄→📊 Missing food — Total + per-page debug")
+st.title("📄→📊 Metric totals (latest period) + per-page debug")
 
 with st.sidebar:
     st.header("Extraction / Cleaning")
     if "cfg" not in st.session_state:
         st.session_state["cfg"] = ExtractConfig()
     cfg: ExtractConfig = st.session_state["cfg"]
-
     cfg.use_ocr = st.toggle("Use OCR (pytesseract)", value=cfg.use_ocr)
     cfg.normalize_unicode = st.checkbox("Normalize Unicode", value=cfg.normalize_unicode)
     cfg.collapse_whitespace = st.checkbox("Collapse extra spaces", value=cfg.collapse_whitespace)
@@ -306,7 +311,6 @@ with st.sidebar:
     cfg.drop_header_lines = st.number_input("Drop header lines per page", 0, 50, value=cfg.drop_header_lines)
     cfg.drop_footer_lines = st.number_input("Drop footer lines per page", 0, 50, value=cfg.drop_footer_lines)
     cfg.remove_page_numbers = st.checkbox("Remove page number lines", value=cfg.remove_page_numbers)
-
     st.subheader("OCR health check")
     try:
         t_path = shutil.which("tesseract")
@@ -322,9 +326,8 @@ if not pdf_file:
     st.info("Upload a PDF to begin.")
     st.stop()
 
-# Mapping (kept for future; prefilled to Missing food)
-st.markdown("**Step 2 — Mapping JSON (prefilled to ‘Missing food’ total)**")
-mapping_text = st.text_area("Mapping JSON", value=DEFAULT_MAPPING_JSON, height=160)
+st.markdown("**Step 2 — Mapping JSON (you can edit)**")
+mapping_text = st.text_area("Mapping JSON", value=DEFAULT_MAPPING_JSON, height=220)
 
 # Extract + clean
 pdf_bytes = io.BytesIO(pdf_file.read())
@@ -339,7 +342,6 @@ txt = normalize_text(txt, cfg)
 # Parse matrix
 with st.spinner("Parsing matrix..."):
     df_wide, labels = parse_matrix_blocks(txt, ncols=14)
-
 if df_wide.empty:
     st.error("No matrix rows matched. Ensure header includes 'Reason for Contact' and rows end with 14 numbers.")
     st.stop()
@@ -348,52 +350,81 @@ latest_label = pick_latest_period_label(labels)
 if not latest_label:
     st.error("Could not detect period labels.")
     st.stop()
-
 st.success(f"Detected period columns: {', '.join(labels)} • Latest: **{latest_label}**")
 
 # Apply mapping
 mapping_cfg = load_mapping(mapping_text)
 with st.spinner("Applying mapping & aggregating..."):
     result_df, diags = apply_mapping(df_wide, labels, mapping_cfg)
-
 if result_df.empty:
-    st.warning("No rows after mapping. Verify the pattern 'Item (Food)' exists.")
+    st.warning("No rows after mapping. Verify your patterns and sections.")
     st.stop()
 
-# --- Show ONLY the total for latest period (sum across sections) ---
-total_df = result_df[["label", latest_label]].groupby("label", as_index=False).sum(min_count=1)
-total_value = int(total_df.loc[total_df["label"]=="Missing food", latest_label].sum())
-st.subheader("Latest period total (sum across sections)")
-st.metric(label=f"Missing food — {latest_label}", value=total_value)
-st.download_button(
-    f"⬇️ Download CSV (total {latest_label})",
-    data=total_df.to_csv(index=False).encode("utf-8"),
-    file_name=f"missing_food_total_{latest_label}.csv",
-    mime="text/csv",
-    use_container_width=True,
-)
+# --- Render one block per metric ---
+rules: List[Dict[str, Any]] = mapping_cfg.get("metrics", [])
+label_to_rule = {r["label"]: r for r in rules}
+available_labels = [r["label"] for r in rules]
 
-# --- Debug expander: per-page totals for latest period ---
-with st.expander("🔎 Debug: per-page totals (latest period)"):
-    with st.spinner("Computing per-page totals..."):
-        page_totals = per_page_totals_for_metric(
-            pdf_bytes=io.BytesIO(pdf_bytes.getvalue()),
-            labels=labels,
-            target_label=latest_label,
-            pattern_regex=r"Item \(Food\)",
-        )
-    if page_totals.empty:
-        st.info("No pages with non-zero totals for the latest period.")
+for label in available_labels:
+    st.markdown("---")
+    st.subheader(f"{label} — total ({latest_label})")
+
+    # total value
+    if label not in result_df["label"].values:
+        st.info("No matches for this metric in the PDF.")
+        continue
+    total_value = int(result_df.loc[result_df["label"]==label, latest_label].sum())
+    st.metric(label=f"{label} — {latest_label}", value=total_value)
+
+    # total CSV (single row per metric)
+    out_df = pd.DataFrame({"label":[label], latest_label:[total_value]})
+    st.download_button(
+        f"⬇️ Download CSV — {label} total ({latest_label})",
+        data=out_df.to_csv(index=False).encode("utf-8"),
+        file_name=f"{label.lower().replace(' ','_')}_total_{latest_label}.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+    # Debug expander: per-page totals filtered to this metric's sections + pattern
+    rule = label_to_rule[label]
+    patterns = rule.get("patterns", [])
+    regex = bool(rule.get("regex", False))
+    if not patterns:
+        st.info("No pattern specified.")
+        continue
+
+    # Build a combined regex (why: support multiple patterns)
+    if regex:
+        pat_regex = "|".join(f"(?:{p})" for p in patterns)
     else:
-        st.dataframe(page_totals, use_container_width=True)
-        st.download_button(
-            f"⬇️ Download CSV (per-page {latest_label})",
-            data=page_totals.to_csv(index=False).encode("utf-8"),
-            file_name=f"missing_food_per_page_{latest_label}.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
+        pat_regex = "|".join(re.escape(p) for p in patterns)
 
-# Optional: show diagnostics (how many rows matched before aggregation)
+    allowed_sections = rule.get("sections", ["*"])
+    if "*" in allowed_sections:
+        allowed_sections = ["Delivery","Dine-In","To-Go","Carryout","Takeout","Carry Out","Dine In","To Go"]  # broad allow
+
+    with st.expander(f"🔎 Debug — per-page totals for {label} ({latest_label})"):
+        with st.spinner("Computing per-page totals..."):
+            page_totals = per_page_totals_for_metric(
+                pdf_bytes=io.BytesIO(pdf_bytes.getvalue()),
+                labels=labels,
+                target_label=latest_label,
+                pattern_regex=pat_regex,
+                allowed_sections=allowed_sections,
+            )
+        if page_totals.empty:
+            st.info("No pages with non-zero totals for the latest period.")
+        else:
+            st.dataframe(page_totals, use_container_width=True)
+            st.download_button(
+                f"⬇️ Download CSV — per-page {label} ({latest_label})",
+                data=page_totals.to_csv(index=False).encode("utf-8"),
+                file_name=f"{label.lower().replace(' ','_')}_per_page_{latest_label}.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+# Optional: diagnostics
 with st.expander("Diagnostics"):
     st.write(pd.DataFrame(diags))

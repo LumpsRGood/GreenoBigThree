@@ -1,5 +1,4 @@
-# path: packages.txt
 tesseract-ocr
 poppler-utils     # if you switch to pdf2image for rasterization
 ghostscript       # helpful for some PDF rendering paths
-# imagemagick     # only if you really need it; may have policy restrictions
+imagemagick     # only if you really need it; may have policy restrictions

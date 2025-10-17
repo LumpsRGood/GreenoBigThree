@@ -1,6 +1,17 @@
-streamlit>=1.33
-pandas>=2.2
-openpyxl>=3.1
+# path: requirements.txt
+# --- Core ---
+streamlit>=1.28
+pandas>=1.5
 pdfplumber>=0.11
-tabula-py>=2.9
-camelot-py[cv]>=0.11
+
+# --- OCR (optional; requires system Tesseract) ---
+# On macOS: brew install tesseract
+# On Ubuntu/Debian: sudo apt-get install -y tesseract-ocr
+pytesseract>=0.3.10
+Pillow>=9.5
+
+# Notes:
+# - pdfplumber uses pdfminer.six under the hood; it will be installed automatically.
+# - If OCR page rasterization via page.to_image() errors, you may also need:
+#   - Wand (pip install Wand) + ImageMagick (system) OR use pdf2image + poppler-utils (system).
+#   These are NOT required unless you enable OCR and see rasterization errors.

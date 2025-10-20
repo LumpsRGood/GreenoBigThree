@@ -1,6 +1,6 @@
 # path: app.py
-# Streamlit — PDF → Metric totals (latest/selected period) + per-page debug
-# Why comments: only where behavior is non-obvious.
+# Streamlit — PDF → Metrics (latest/selected period) + per-page debug
+# Comments only where behavior needs explanation.
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ import streamlit as st
 
 st.set_page_config(page_title="PDF → Metrics", page_icon="📄", layout="wide")
 
-# Optional OCR (for image-only PDFs)
+# Optional OCR (image-only PDFs)
 try:
     import pytesseract
     _HAS_TESSERACT = True
@@ -86,7 +86,7 @@ DEFAULT_MAPPING_JSON = r"""
       "section_aggregate": "sum"
     },
 
-    { 
+    {
       "label": "Unprofessional/Unfriendly",
       "patterns": ["Unfriendly Attitude", "Unprofessional Behavior"],
       "regex": false,
@@ -94,13 +94,13 @@ DEFAULT_MAPPING_JSON = r"""
       "section_aggregate": "sum"
     },
     {
-  "label": "Manager directly involved",
-  "patterns": ["Directly\\s*-?\\s*Involved"],
-  "regex": true,
-  "sections": ["*"],
-  "section_aggregate": "sum"
-}
-    { 
+      "label": "Manager directly involved",
+      "patterns": ["Directly\\s*-?\\s*Involved"],
+      "regex": true,
+      "sections": ["*"],
+      "section_aggregate": "sum"
+    },
+    {
       "label": "Manager not available",
       "patterns": ["Management Not Available"],
       "regex": false,
@@ -210,7 +210,7 @@ def extract_pdf_text(file: io.BytesIO, use_ocr: bool) -> Tuple[str, List[str]]:
             if use_ocr:
                 try:
                     img = page.to_image(resolution=300).original
-                    txt = pytesseract.image_to_string(img)
+                    txt = pytesseract.image_to_string(img)  # why: image-only pages
                 except Exception:
                     txt = page.extract_text(layout=True) or ""
             else:
@@ -331,7 +331,7 @@ def match_metric(name: str, rule: Dict[str, Any], default_ci: bool) -> bool:
     ci = bool(rule.get("case_insensitive", default_ci))
     flags = re.IGNORECASE if ci else 0
     if use_regex:
-        return any(re.search(p, name, flags=flags) for p in pats)  # why: substring-friendly
+        return any(re.search(p, name, flags=flags) for p in pats)  # substring-friendly
     return any((p.lower() == name.lower()) if ci else (p == name) for p in pats)
 
 def section_allowed(section: Optional[str], rule: Dict[str, Any]) -> bool:
@@ -365,13 +365,11 @@ def apply_mapping(df: pd.DataFrame, labels: List[str], mapping: Dict[str, Any]) 
             agg.insert(0, "label", label)
         else:
             totals = matched[use_cols].sum(min_count=1)
-            agg = pd.DataFrame([totals])
-            agg.insert(0, "label", label)
+            agg = pd.DataFrame([totals]); agg.insert(0, "label", label)
         period_cols = [c for c in use_cols if c.lower() != "total"]
         agg["Recalc_Total"] = agg[period_cols].sum(axis=1, min_count=1)
         if "Total" in use_cols:
-            agg["PDF_Total"] = agg["Total"]
-            agg["Diff"] = agg["Recalc_Total"] - agg["PDF_Total"]
+            agg["PDF_Total"] = agg["Total"]; agg["Diff"] = agg["Recalc_Total"] - agg["PDF_Total"]
         outputs.append(agg)
     if not outputs:
         return pd.DataFrame(columns=["label"] + labels + ["Recalc_Total"]), diags
@@ -406,10 +404,7 @@ def per_page_totals_for_metric(
     allowed_sections: List[str],
     carry_forward_sections: bool = True,
 ) -> pd.DataFrame:
-    """
-    Sum counts per page for lines whose metric matches pattern and whose section
-    is allowed. Carry-forward avoids misses when headers don't repeat across pages.
-    """
+    # why: carry-forward avoids misses when section headers don't repeat across pages
     allowed = set(norm_section(s) for s in allowed_sections) if allowed_sections else None
     pages_totals: Dict[int, int] = {}
     pat_line = metric_line_pattern(ncols=14)
@@ -481,7 +476,7 @@ if not pdf_file:
     st.stop()
 
 st.markdown("**Step 2 — Mapping JSON**")
-mapping_text = st.text_area("Mapping JSON", value=DEFAULT_MAPPING_JSON, height=540)
+mapping_text = st.text_area("Mapping JSON", value=DEFAULT_MAPPING_JSON, height=560)
 
 # Extract + clean
 pdf_bytes = io.BytesIO(pdf_file.read())
@@ -503,7 +498,8 @@ if df_wide.empty:
 # Period selector (default: latest)
 latest_label = pick_latest_period_label(labels)
 period_choices = [c for c in labels if c.lower() != "total"]
-period_label = st.selectbox("Period", options=period_choices, index=period_choices.index(latest_label) if latest_label in period_choices else 0)
+default_idx = period_choices.index(latest_label) if latest_label in period_choices else 0
+period_label = st.selectbox("Period", options=period_choices, index=default_idx)
 st.success(f"Detected period columns: {', '.join(labels)} • Selected: **{period_label}**")
 
 # Apply mapping
@@ -514,7 +510,7 @@ if result_df.empty:
     st.warning("No rows after mapping. Verify your patterns and sections.")
     st.stop()
 
-# Render per metric (card + per-page debug)
+# Render per metric
 rules: List[Dict[str, Any]] = mapping_cfg.get("metrics", [])
 label_to_rule = {r["label"]: r for r in rules}
 available_labels = [r["label"] for r in rules]
@@ -558,7 +554,7 @@ for label in available_labels:
                 target_label=period_label,
                 pattern_regex=pat_regex,
                 allowed_sections=allowed_sections,
-                carry_forward_sections=True,  # keep ON to avoid missed pages
+                carry_forward_sections=True,  # keep ON
             )
         if page_totals.empty:
             st.info("No pages with non-zero totals for the selected period.")

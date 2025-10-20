@@ -93,13 +93,13 @@ DEFAULT_MAPPING_JSON = r"""
       "sections": ["*"],
       "section_aggregate": "sum"
     },
-    { 
-      "label": "Manager directly involved",
-      "patterns": ["Manager Directly Involved", "Manager Directly Involved In Complaint"],
-      "regex": false,
-      "sections": ["*"],
-      "section_aggregate": "sum"
-    },
+    {
+  "label": "Manager directly involved",
+  "patterns": ["Directly\\s*-?\\s*Involved"],
+  "regex": true,
+  "sections": ["*"],
+  "section_aggregate": "sum"
+}
     { 
       "label": "Manager not available",
       "patterns": ["Management Not Available"],

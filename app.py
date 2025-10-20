@@ -1,10 +1,11 @@
 # path: app.py
-# Streamlit — Metric totals (latest period) for:
-#  - Missing food (To-Go, Dine-In, Delivery) — sum
-#  - Order wrong (To-Go, Delivery) — sum
-#  - Missing condiments (To-Go, Delivery) — sum
-#  - Out of menu item (To-Go, Delivery) — sum
-# Per-page debug uses section carry-forward across page breaks.
+# Streamlit — Metric totals (latest period) + per-page debug (carry-forward sections)
+# Metrics:
+#  - Missing food (To-Go, Dine-In, Delivery) — regex "Item (Food)"
+#  - Order wrong (To-Go, Delivery) — "Order Wrong" + "Not Made To Order"
+#  - Missing condiments (To-Go, Delivery)
+#  - Out of menu item (To-Go, Delivery)
+#  - Missing bev (To-Go, Delivery) — regex "Item (Bev)"
 
 from __future__ import annotations
 
@@ -49,7 +50,7 @@ DEFAULT_MAPPING_JSON = r"""
     },
     {
       "label": "Order wrong",
-      "patterns": ["Order Wrong"],
+      "patterns": ["Order Wrong", "Not Made To Order"],
       "regex": false,
       "sections": ["To-Go", "Delivery"],
       "section_aggregate": "sum"
@@ -65,6 +66,13 @@ DEFAULT_MAPPING_JSON = r"""
       "label": "Out of menu item",
       "patterns": ["Out Of Menu Item"],
       "regex": false,
+      "sections": ["To-Go", "Delivery"],
+      "section_aggregate": "sum"
+    },
+    {
+      "label": "Missing bev",
+      "patterns": ["Item \\(Bev\\)"],
+      "regex": true,
       "sections": ["To-Go", "Delivery"],
       "section_aggregate": "sum"
     }
@@ -94,7 +102,7 @@ def extract_pdf_text(file: io.BytesIO, use_ocr: bool) -> Tuple[str, List[str]]:
             if use_ocr:
                 try:
                     img = page.to_image(resolution=300).original
-                    txt = pytesseract.image_to_string(img)  # why: image-only pages
+                    txt = pytesseract.image_to_string(img)  # only for image-only pages
                 except Exception as e:
                     st.warning(f"OCR failed; using native text. ({e})")
                     txt = page.extract_text(layout=True) or ""
@@ -107,7 +115,7 @@ def normalize_text(s: str, cfg: ExtractConfig) -> str:
     if cfg.normalize_unicode:
         s = unicodedata.normalize("NFKC", s)
     if cfg.hyphenation_fix:
-        s = re.sub(r"(\w)-\n(\w)", r"\1\2", s)  # join broken words
+        s = re.sub(r"(\w)-\n(\w)", r"\1\2", s)
     s = s.replace("\r\n", "\n").replace("\r", "\n")
     if cfg.collapse_whitespace:
         s = "\n".join(re.sub(r"[ \t]+", " ", ln) for ln in s.split("\n"))
@@ -269,7 +277,7 @@ def pick_latest_period_label(labels: List[str]) -> Optional[str]:
     if all(k >= 0 for _, k in scored): return max(scored, key=lambda x: x[1])[0]
     return cand[-1]
 
-# -------- Per-page debug (section carry-forward) --------
+# -------- Per-page debug (carry-forward sections) --------
 def per_page_totals_for_metric(
     pdf_bytes: io.BytesIO,
     labels: List[str],
@@ -341,7 +349,7 @@ if not pdf_file:
     st.info("Upload a PDF to begin."); st.stop()
 
 st.markdown("**Step 2 — Mapping JSON**")
-mapping_text = st.text_area("Mapping JSON", value=DEFAULT_MAPPING_JSON, height=320)
+mapping_text = st.text_area("Mapping JSON", value=DEFAULT_MAPPING_JSON, height=360)
 
 # Extract + clean
 pdf_bytes = io.BytesIO(pdf_file.read())
@@ -414,7 +422,7 @@ for label in available_labels:
                 target_label=latest_label,
                 pattern_regex=pat_regex,
                 allowed_sections=allowed_sections,
-                carry_forward_sections=True,  # critical for cross-page section continuity
+                carry_forward_sections=True,  # keep this on to avoid missed pages
             )
         if page_totals.empty:
             st.info("No pages with non-zero totals for the latest period.")

@@ -1,13 +1,12 @@
 # path: app.py
-# Streamlit — PDF → Metrics (latest/selected period) + per-page debug
-# Comments only where behavior needs explanation.
+# Streamlit — PDF → Scoreboard (selected period totals)
+# UI: no sidebar, no debug/diagnostics. Top scoreboard with per-metric spinners.
 
 from __future__ import annotations
 
 import io
 import json
 import re
-import shutil
 import unicodedata
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
@@ -15,14 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="PDF → Metrics", page_icon="📄", layout="wide")
-
-# Optional OCR (image-only PDFs)
-try:
-    import pytesseract
-    _HAS_TESSERACT = True
-except Exception:
-    _HAS_TESSERACT = False
+st.set_page_config(page_title="PDF → Scoreboard", page_icon="📊", layout="wide")
 
 # PDF extractor
 try:
@@ -31,7 +23,7 @@ except Exception:
     st.error("Missing dependency: pdfplumber. Add `pdfplumber` to requirements.txt.")
     st.stop()
 
-# ---------------------- Mapping (JSON, no comments) ----------------------
+# ---------------------- Locked Mapping (JSON, no comments) ----------------------
 DEFAULT_MAPPING_JSON = r"""
 {
   "case_insensitive": true,
@@ -95,7 +87,7 @@ DEFAULT_MAPPING_JSON = r"""
     },
     {
       "label": "Manager directly involved",
-      "patterns": ["Directly\\s*-?\\s*Involved"],
+      "patterns": ["^Manager\\s*Directly(?:\\s|-)?"],
       "regex": true,
       "sections": ["*"],
       "section_aggregate": "sum"
@@ -188,33 +180,38 @@ DEFAULT_MAPPING_JSON = r"""
 }
 """
 
+# ---------------------- Styles (score bug + spinner) ----------------------
+SCOREBOARD_CSS = """
+<style>
+.score-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.score-card { border: 1px solid rgba(0,0,0,0.08); border-radius: 14px; padding: 14px 16px; background: white; box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
+.score-title { font-size: 0.93rem; color: #444; margin: 0 0 6px 0; line-height: 1.2; }
+.score-value { font-size: 1.8rem; font-weight: 700; margin: 2px 0 0 0; }
+.spinner {
+  width: 20px; height: 20px; border: 3px solid #eee; border-top-color: #2e7df6; border-radius: 50%;
+  animation: spin 0.9s linear infinite; display:inline-block; vertical-align: middle; margin-right:8px;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.loading-row { display:flex; align-items:center; color:#666; }
+</style>
+"""
+
 # ---------------------- Extraction / cleaning ----------------------
 @dataclass
 class ExtractConfig:
-    use_ocr: bool = False
     normalize_unicode: bool = True
     collapse_whitespace: bool = True
     remove_empty_lines: bool = True
-    hyphenation_fix: bool = False
+    hyphenation_fix: bool = True       # ON by default to resist line wraps
     drop_header_lines: int = 0
     drop_footer_lines: int = 0
     remove_page_numbers: bool = True
 
-def extract_pdf_text(file: io.BytesIO, use_ocr: bool) -> Tuple[str, List[str]]:
-    if use_ocr and not _HAS_TESSERACT:
-        st.warning("OCR selected but pytesseract is unavailable; using native text.")
-        use_ocr = False
+def extract_pdf_text(file: io.BytesIO) -> Tuple[str, List[str]]:
     pages: List[str] = []
     with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
-            if use_ocr:
-                try:
-                    img = page.to_image(resolution=300).original
-                    txt = pytesseract.image_to_string(img)  # why: image-only pages
-                except Exception:
-                    txt = page.extract_text(layout=True) or ""
-            else:
-                txt = page.extract_text(layout=True) or ""
+            txt = page.extract_text(layout=True) or ""
             pages.append(txt or "")
     return "\n<<<PAGE_BREAK>>>\n".join(pages), pages
 
@@ -222,7 +219,7 @@ def normalize_text(s: str, cfg: ExtractConfig) -> str:
     if cfg.normalize_unicode:
         s = unicodedata.normalize("NFKC", s)
     if cfg.hyphenation_fix:
-        s = re.sub(r"(\w)-\n(\w)", r"\1\2", s)  # why: join hyphen-breaks
+        s = re.sub(r"(\w)-\n(\w)", r"\1\2", s)  # join hyphen-split words
     s = s.replace("\r\n", "\n").replace("\r", "\n")
     if cfg.collapse_whitespace:
         s = "\n".join(re.sub(r"[ \t]+", " ", ln) for ln in s.split("\n"))
@@ -246,10 +243,8 @@ def remove_page_numbers(text: str) -> str:
     keep = []
     for ln in text.split("\n"):
         t = ln.strip()
-        if re.fullmatch(r"Page\s+\d+(?:\s*/\s*\d+)?", t, flags=re.I):
-            continue
-        if re.fullmatch(r"\d{1,4}", t):
-            continue
+        if re.fullmatch(r"Page\\s+\\d+(?:\\s*/\\s*\\d+)?", t, flags=re.I): continue
+        if re.fullmatch(r"\\d{1,4}", t): continue
         keep.append(ln)
     return "\n".join(keep)
 
@@ -264,16 +259,17 @@ SECTION_ALIASES = {
     "to go": "To-Go",
     "to-go": "To-Go"
 }
+SECTION_SYMBOLS = {"Delivery","Dine-In","Dine In","To-Go","To Go","Carryout","Carry Out","Takeout"}
+
 def norm_section(s: Optional[str]) -> Optional[str]:
-    if s is None:
-        return None
+    if s is None: return None
     k = s.strip().lower()
     return SECTION_ALIASES.get(k, s.strip())
 
 def extract_period_labels(text: str, expected: int = 14) -> List[str]:
     for ln in text.splitlines():
         if ("Reason for Contact" in ln) and ("Total" in ln):
-            parts = re.findall(r"P\d{1,2}\s+\d{2}", ln)
+            parts = re.findall(r"P\\d{1,2}\\s+\\d{2}", ln)
             if len(parts) >= expected - 1:
                 labels = [p.replace(" ", "_") for p in parts[: expected - 1]]
                 labels.append("Total")
@@ -281,8 +277,8 @@ def extract_period_labels(text: str, expected: int = 14) -> List[str]:
     return [f"col{i:02d}" for i in range(1, expected + 1)]
 
 def metric_line_pattern(ncols: int = 14) -> re.Pattern:
-    nums = r"\s+".join([fr"(?P<c{i:02d}>\d+)" for i in range(1, ncols + 1)])
-    return re.compile(fr"^(?P<metric>[A-Za-z][A-Za-z0-9/'&()\- ]+?)\s*:?[\s]+{nums}\s*$")
+    nums = r"\\s+".join([fr"(?P<c{i:02d}>\\d+)" for i in range(1, ncols + 1)])
+    return re.compile(fr"^(?P<metric>[A-Za-z][A-Za-z0-9/'&()\\- ]+?)\\s*:?[\\s]+{nums}\\s*$")
 
 def parse_matrix_blocks(text: str, ncols: int = 14) -> Tuple[pd.DataFrame, List[str]]:
     labels = extract_period_labels(text, expected=ncols)
@@ -291,14 +287,12 @@ def parse_matrix_blocks(text: str, ncols: int = 14) -> Tuple[pd.DataFrame, List[
     section: Optional[str] = None
     for raw in text.splitlines():
         ln = raw.strip()
-        if not ln:
-            continue
-        if ln.lower() in SECTION_ALIASES or ln in {"Delivery","Dine-In","Dine In","To-Go","To Go","Carryout","Carry Out","Takeout"}:
+        if not ln: continue
+        if ln.lower() in SECTION_ALIASES or ln in SECTION_SYMBOLS:
             section = norm_section(ln)
             continue
         m = pat.match(ln)
-        if not m:
-            continue
+        if not m: continue
         gd = m.groupdict()
         metric_name = gd.pop("metric").rstrip(":").strip()
         vals = [gd[f"c{i:02d}"] for i in range(1, ncols + 1)]
@@ -313,20 +307,12 @@ def parse_matrix_blocks(text: str, ncols: int = 14) -> Tuple[pd.DataFrame, List[
     return df, labels
 
 # ---------------------- Mapping engine ----------------------
-def load_mapping(text: str) -> Dict[str, Any]:
-    try:
-        cfg = json.loads(text) if text.strip() else {"metrics": []}
-        if "metrics" not in cfg or not isinstance(cfg["metrics"], list):
-            raise ValueError("Missing 'metrics' array.")
-        return cfg
-    except Exception as e:
-        st.error(f"Mapping JSON error: {e}")
-        st.stop()
+def load_mapping_constant() -> Dict[str, Any]:
+    return json.loads(DEFAULT_MAPPING_JSON)
 
 def match_metric(name: str, rule: Dict[str, Any], default_ci: bool) -> bool:
     pats: List[str] = rule.get("patterns", [])
-    if not pats:
-        return False
+    if not pats: return False
     use_regex = bool(rule.get("regex", False))
     ci = bool(rule.get("case_insensitive", default_ci))
     flags = re.IGNORECASE if ci else 0
@@ -342,10 +328,8 @@ def section_allowed(section: Optional[str], rule: Dict[str, Any]) -> bool:
     canon = set(norm_section(s) for s in allowed)
     return sec in canon
 
-def apply_mapping(df: pd.DataFrame, labels: List[str], mapping: Dict[str, Any]) -> Tuple[pd.DataFrame, List[Dict[str, Any]]]:
-    diags: List[Dict[str, Any]] = []
-    if df.empty:
-        return pd.DataFrame(), diags
+def apply_mapping(df: pd.DataFrame, labels: List[str], mapping: Dict[str, Any]) -> pd.DataFrame:
+    if df.empty: return pd.DataFrame()
     for lab in labels:
         if lab in df.columns:
             df[lab] = pd.to_numeric(df[lab], errors="coerce")
@@ -356,8 +340,10 @@ def apply_mapping(df: pd.DataFrame, labels: List[str], mapping: Dict[str, Any]) 
         agg_mode = (rule.get("section_aggregate") or "sum").lower()
         mask = df.apply(lambda r: match_metric(r["metric"], rule, ci_default) and section_allowed(r["section"], rule), axis=1)
         matched = df[mask].copy()
-        diags.append({"label": label, "matched_rows": int(matched.shape[0])})
         if matched.empty:
+            totals = pd.Series({c: 0 for c in labels})
+            agg = pd.DataFrame([totals]); agg.insert(0, "label", label)
+            outputs.append(agg)
             continue
         use_cols = [c for c in labels if c in matched.columns]
         if agg_mode == "by_section":
@@ -366,19 +352,16 @@ def apply_mapping(df: pd.DataFrame, labels: List[str], mapping: Dict[str, Any]) 
         else:
             totals = matched[use_cols].sum(min_count=1)
             agg = pd.DataFrame([totals]); agg.insert(0, "label", label)
-        period_cols = [c for c in use_cols if c.lower() != "total"]
-        agg["Recalc_Total"] = agg[period_cols].sum(axis=1, min_count=1)
-        if "Total" in use_cols:
-            agg["PDF_Total"] = agg["Total"]; agg["Diff"] = agg["Recalc_Total"] - agg["PDF_Total"]
         outputs.append(agg)
     if not outputs:
-        return pd.DataFrame(columns=["label"] + labels + ["Recalc_Total"]), diags
+        return pd.DataFrame(columns=["label"] + labels)
     out = pd.concat(outputs, ignore_index=True)
+    # collapse duplicate labels if any
     id_cols = ["label"] + (["section"] if "section" in out.columns else [])
     value_cols = [c for c in out.columns if c not in id_cols]
     out = out.groupby(id_cols, dropna=False)[value_cols].sum(min_count=1).reset_index()
-    ordered = ["label"] + [c for c in labels if c in out.columns] + [c for c in ["Recalc_Total", "PDF_Total", "Diff"] if c in out.columns]
-    return out[ordered], diags
+    ordered = ["label"] + [c for c in labels if c in out.columns]
+    return out[ordered]
 
 def pick_latest_period_label(labels: List[str]) -> Optional[str]:
     cand = [lab for lab in labels if lab.lower() != "total"]
@@ -386,8 +369,7 @@ def pick_latest_period_label(labels: List[str]) -> Optional[str]:
         return None
     def key(lbl: str) -> int:
         m = re.match(r"^P(\d{1,2})_(\d{2})$", lbl)
-        if not m:
-            return -1
+        if not m: return -1
         p = int(m.group(1)); y = int(m.group(2))
         return y * 100 + p
     scored = [(lbl, key(lbl)) for lbl in cand]
@@ -395,178 +377,69 @@ def pick_latest_period_label(labels: List[str]) -> Optional[str]:
         return max(scored, key=lambda x: x[1])[0]
     return cand[-1]
 
-# ---------------------- Per-page debug (carry-forward) ----------------------
-def per_page_totals_for_metric(
-    pdf_bytes: io.BytesIO,
-    labels: List[str],
-    target_label: str,
-    pattern_regex: str,
-    allowed_sections: List[str],
-    carry_forward_sections: bool = True,
-) -> pd.DataFrame:
-    # why: carry-forward avoids misses when section headers don't repeat across pages
-    allowed = set(norm_section(s) for s in allowed_sections) if allowed_sections else None
-    pages_totals: Dict[int, int] = {}
-    pat_line = metric_line_pattern(ncols=14)
+# ---------------------- UI (no sidebar) ----------------------
+st.markdown("# 📊 Scoreboard")
+st.caption("Upload the PDF, choose a period, and see totals at a glance.")
 
-    with pdfplumber.open(pdf_bytes) as pdf:
-        section = None
-        for page_idx, page in enumerate(pdf.pages, start=1):
-            if not carry_forward_sections:
-                section = None
-            txt = page.extract_text(layout=True) or ""
-            lines = [unicodedata.normalize("NFKC", ln) for ln in txt.splitlines()]
-            for raw in lines:
-                ln = re.sub(r"[ \t]+", " ", raw.strip())
-                if not ln:
-                    continue
-                if ln.lower() in SECTION_ALIASES or ln in {"Delivery","Dine-In","Dine In","To-Go","To Go","Carryout","Carry Out","Takeout"}:
-                    section = norm_section(ln)
-                    continue
-                m = pat_line.match(ln)
-                if not m:
-                    continue
-                if allowed and section not in allowed:
-                    continue
-                metric_name = m.group("metric").rstrip(":").strip()
-                if not re.search(pattern_regex, metric_name, flags=re.I):
-                    continue
-                vals = [m.group(f"c{i:02d}") for i in range(1, 14 + 1)]
-                if target_label in labels:
-                    idx = labels.index(target_label)
-                    v = vals[idx] if idx < len(vals) else None
-                    cnt = int(v) if v and v.isdigit() else 0
-                    if cnt:
-                        pages_totals[page_idx] = pages_totals.get(page_idx, 0) + cnt
-
-    if not pages_totals:
-        return pd.DataFrame(columns=["page", "total"])
-    return pd.DataFrame(sorted(pages_totals.items()), columns=["page", "total"])
-
-# ---------------------- UI ----------------------
-st.title("📄 → 📊 Metric totals + per-page debug")
-
-with st.sidebar:
-    st.header("Extraction / Cleaning")
-    if "cfg" not in st.session_state:
-        st.session_state["cfg"] = ExtractConfig()
-    cfg: ExtractConfig = st.session_state["cfg"]
-    cfg.use_ocr = st.toggle("Use OCR (pytesseract)", value=cfg.use_ocr)
-    cfg.normalize_unicode = st.checkbox("Normalize Unicode", value=cfg.normalize_unicode)
-    cfg.collapse_whitespace = st.checkbox("Collapse extra spaces", value=cfg.collapse_whitespace)
-    cfg.remove_empty_lines = st.checkbox("Remove empty lines", value=cfg.remove_empty_lines)
-    cfg.hyphenation_fix = st.checkbox("Fix hyphenation joins", value=cfg.hyphenation_fix)
-    cfg.drop_header_lines = st.number_input("Drop header lines per page", 0, 50, value=cfg.drop_header_lines)
-    cfg.drop_footer_lines = st.number_input("Drop footer lines per page", 0, 50, value=cfg.drop_footer_lines)
-    cfg.remove_page_numbers = st.checkbox("Remove page number lines", value=cfg.remove_page_numbers)
-
-    st.subheader("OCR health check")
-    try:
-        t_path = shutil.which("tesseract")
-        st.caption(f"Tesseract: **{bool(t_path)}** | path: `{t_path}`")
-        if _HAS_TESSERACT:
-            st.caption(f"Version: **{pytesseract.get_tesseract_version()}**")
-    except Exception as e:
-        st.warning(f"OCR check issue: {e}")
-
-st.markdown("**Step 1 — Upload PDF**")
 pdf_file = st.file_uploader("Choose a PDF", type=["pdf"])
 if not pdf_file:
-    st.info("Upload a PDF to begin.")
     st.stop()
 
-st.markdown("**Step 2 — Mapping JSON**")
-mapping_text = st.text_area("Mapping JSON", value=DEFAULT_MAPPING_JSON, height=560)
+cfg = ExtractConfig()  # locked defaults
 
-# Extract + clean
-pdf_bytes = io.BytesIO(pdf_file.read())
-with st.spinner("Extracting text..."):
-    raw_text, _pages = extract_pdf_text(pdf_bytes, use_ocr=cfg.use_ocr)
-
-txt = strip_headers_footers(raw_text, cfg)
-if cfg.remove_page_numbers:
-    txt = remove_page_numbers(txt)
-txt = normalize_text(txt, cfg)
-
-# Parse → labels
-with st.spinner("Parsing matrix..."):
+with st.spinner("Extracting & parsing…"):
+    pdf_bytes = io.BytesIO(pdf_file.read())
+    raw_text, _pages = extract_pdf_text(pdf_bytes)
+    txt = strip_headers_footers(raw_text, cfg)
+    if cfg.remove_page_numbers: txt = remove_page_numbers(txt)
+    txt = normalize_text(txt, cfg)
     df_wide, labels = parse_matrix_blocks(txt, ncols=14)
+
 if df_wide.empty:
     st.error("No matrix rows matched. Ensure header includes 'Reason for Contact' and rows end with 14 numbers.")
     st.stop()
 
-# Period selector (default: latest)
-latest_label = pick_latest_period_label(labels)
+latest_label = pick_latest_period_label(labels) or labels[0]
 period_choices = [c for c in labels if c.lower() != "total"]
-default_idx = period_choices.index(latest_label) if latest_label in period_choices else 0
-period_label = st.selectbox("Period", options=period_choices, index=default_idx)
-st.success(f"Detected period columns: {', '.join(labels)} • Selected: **{period_label}**")
+cols = st.columns([1,2,2,2])
+with cols[0]:
+    st.write("**Period**")
+with cols[1]:
+    period_label = st.selectbox("", options=period_choices, index=period_choices.index(latest_label) if latest_label in period_choices else 0, label_visibility="collapsed")
 
-# Apply mapping
-mapping_cfg = load_mapping(mapping_text)
-with st.spinner("Applying mapping & aggregating..."):
-    result_df, diags = apply_mapping(df_wide, labels, mapping_cfg)
-if result_df.empty:
-    st.warning("No rows after mapping. Verify your patterns and sections.")
-    st.stop()
+# Scoreboard skeleton with spinners
+mapping_cfg = load_mapping_constant()
+metric_rules: List[Dict[str, Any]] = mapping_cfg.get("metrics", [])
+metric_labels = [r["label"] for r in metric_rules]
 
-# Render per metric
-rules: List[Dict[str, Any]] = mapping_cfg.get("metrics", [])
-label_to_rule = {r["label"]: r for r in rules}
-available_labels = [r["label"] for r in rules]
+st.markdown(SCOREBOARD_CSS, unsafe_allow_html=True)
+grid = st.container()
+with grid:
+    st.markdown('<div class="score-grid">', unsafe_allow_html=True)
+    placeholders: Dict[str, st.delta_generator.DeltaGenerator] = {}
+    for lab in metric_labels:
+        ph = st.empty()
+        placeholders[lab] = ph
+        ph.markdown(f'''
+            <div class="score-card">
+              <div class="score-title">{lab}</div>
+              <div class="loading-row"><span class="spinner"></span> loading…</div>
+            </div>
+        ''', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
-for label in available_labels:
-    st.markdown("---")
-    st.subheader(f"{label} — total ({period_label})")
+# Compute all totals once
+with st.spinner("Computing totals…"):
+    result_df = apply_mapping(df_wide, labels, mapping_cfg)
 
-    if label not in result_df["label"].values:
-        st.info("No matches for this metric in the PDF.")
-        continue
-
-    total_value = int(result_df.loc[result_df["label"] == label, period_label].sum())
-    st.metric(label=f"{label} — {period_label}", value=total_value)
-
-    out_df = pd.DataFrame({"label": [label], period_label: [total_value]})
-    st.download_button(
-        f"⬇️ Download CSV — {label} total ({period_label})",
-        data=out_df.to_csv(index=False).encode("utf-8"),
-        file_name=f"{label.lower().replace(' ','_')}_total_{period_label}.csv",
-        mime="text/csv",
-        use_container_width=True,
-    )
-
-    rule = label_to_rule[label]
-    patterns = rule.get("patterns", [])
-    regex = bool(rule.get("regex", False))
-    if not patterns:
-        continue
-    pat_regex = "|".join(f"(?:{p})" for p in patterns) if regex else "|".join(re.escape(p) for p in patterns)
-
-    allowed_sections = rule.get("sections", ["*"])
-    if "*" in allowed_sections:
-        allowed_sections = ["Delivery","Dine-In","To-Go","Carryout","Takeout","Carry Out","Dine In","To Go"]
-
-    with st.expander(f"🔎 Debug — per-page totals for {label} ({period_label})"):
-        with st.spinner("Computing per-page totals..."):
-            page_totals = per_page_totals_for_metric(
-                pdf_bytes=io.BytesIO(pdf_bytes.getvalue()),
-                labels=labels,
-                target_label=period_label,
-                pattern_regex=pat_regex,
-                allowed_sections=allowed_sections,
-                carry_forward_sections=True,  # keep ON
-            )
-        if page_totals.empty:
-            st.info("No pages with non-zero totals for the selected period.")
-        else:
-            st.dataframe(page_totals, use_container_width=True)
-            st.download_button(
-                f"⬇️ Download CSV — per-page {label} ({period_label})",
-                data=page_totals.to_csv(index=False).encode("utf-8"),
-                file_name=f"{label.lower().replace(' ','_')}_per_page_{period_label}.csv",
-                mime="text/csv",
-                use_container_width=True,
-            )
-
-with st.expander("Diagnostics"):
-    st.write(pd.DataFrame(diags))
+# Fill in cards
+for lab in metric_labels:
+    val = 0
+    if (not result_df.empty) and (lab in result_df["label"].values) and (period_label in result_df.columns):
+        val = int(result_df.loc[result_df["label"] == lab, period_label].sum())
+    placeholders[lab].markdown(f'''
+        <div class="score-card">
+          <div class="score-title">{lab}</div>
+          <div class="score-value">{val}</div>
+        </div>
+    ''', unsafe_allow_html=True)

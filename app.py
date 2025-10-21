@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
+import base64
 
 # ---------------- Page config (must be first) ----------------
 st.set_page_config(page_title="Greeno Bad Three", page_icon="🐘", layout="wide")
@@ -60,22 +61,27 @@ UI_CSS = """
   --shadow: 0 6px 18px rgba(0,0,0,.10), 0 2px 6px rgba(0,0,0,.06);
 }
 
-/* Lightweight header (non-sticky) */
-.page-header{display:flex;align-items:center;gap:14px;margin:6px 0 10px 0;}
-.page-title{font-size:1.25rem;font-weight:800;margin:0;color:#e5e7eb;}
-.logo-box{width:96px;height:96px;border-radius:12px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.18);background:#1e293b;}
-.logo-box img{width:100%;height:100%;object-fit:cover;border-radius:12px;}
+/* ===== Hero header (non-sticky) ===== */
+.hero{display:flex;align-items:flex-end;gap:14px;margin:4px 0 10px 0;padding:0;}
+.hero-title{font-size:clamp(1.8rem, 3vw, 2.4rem);font-weight:900;margin:0;color:#e5e7eb;line-height:1;}
+.hero-sub{font-size:.95rem;color:#cbd5e1;opacity:.85;margin-top:2px}
 
-/* Row headers */
+/* Fixed background watermark (stays put while scrolling) */
+.bg-mark{position:fixed;top:18px;left:18px;width:min(9vw, 220px);opacity:.10;
+  filter:saturate(1) contrast(1.05);z-index:0;pointer-events:none;}
+/* Lift app content above the watermark */
+[data-testid="stAppViewContainer"] .main .block-container{position:relative;z-index:1}
+
+/* ===== Row headers ===== */
 .row-header{display:flex;align-items:center;gap:8px;height:32px;margin:10px 0 8px 0;}
 .swatch{width:12px;height:12px;border-radius:4px;box-shadow:inset 0 0 0 1px rgba(255,255,255,.25);}
 .row-title{font-size:.95rem;font-weight:700;margin:0;color:#e5e7eb;}
 
-/* Grid (exactly 7 columns) */
+/* ===== Grid (exactly 7 columns) ===== */
 .row-inner{display:grid;grid-template-columns:repeat(7, minmax(110px, 1fr));gap:var(--tile-gap);}
 @media (max-width:1100px){ .row-wrap{overflow-x:auto;padding-bottom:2px;} .row-inner{min-width:900px;} }
 
-/* Tiles (square) */
+/* ===== Tiles (square) ===== */
 .tile{position:relative;width:100%;aspect-ratio:1/1;border-radius:var(--tile-radius);overflow:hidden;box-shadow:var(--shadow);}
 .tile-inner{position:absolute;inset:0;display:grid;grid-template-rows:auto 1fr;padding:10px 12px;}
 .title-small{font-size:.78rem;font-weight:800;margin:0;color:#fff;opacity:.98;text-shadow:0 1px 2px rgba(0,0,0,.18);
@@ -84,7 +90,7 @@ UI_CSS = """
 .value{font-weight:900;line-height:1;margin:0;letter-spacing:-0.3px;font-variant-numeric:tabular-nums;
   font-size:clamp(2.6rem, 5.8vw, 3.6rem);text-shadow:0 2px 4px rgba(0,0,0,.22);}
 
-/* Inner border to reduce banding */
+/* Inner border to reduce banding & hover */
 .tile::after{content:"";position:absolute;inset:0;border-radius:var(--tile-radius);box-shadow:inset 0 0 0 1px rgba(255,255,255,.12);pointer-events:none;}
 .tile:hover{box-shadow:0 10px 22px rgba(0,0,0,.14), 0 4px 10px rgba(0,0,0,.08);}
 
@@ -274,12 +280,24 @@ CATEGORY_META = {
 
 # ---------------- Header (simple, non-sticky) ----------------
 def render_header():
-    st.markdown('<div class="page-header">', unsafe_allow_html=True)
+    # Background watermark (fixed)
     if os.path.exists("greenoosu.webp"):
-        st.image("greenoosu.webp", width=96)
-    else:
-        st.markdown('<div class="logo-box"></div>', unsafe_allow_html=True)
-    st.markdown('<h1 class="page-title">Greeno Bad Three</h1></div>', unsafe_allow_html=True)
+        with open("greenoosu.webp", "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("utf-8")
+        st.markdown(
+            f"<div class='bg-mark'><img src='data:image/webp;base64,{b64}' alt='Greeno watermark'/></div>",
+            unsafe_allow_html=True
+        )
+
+    # Compact hero title (no inline image; watermark handles the brand)
+    st.markdown(
+        """
+        <div class="hero">
+          <h1 class="hero-title">Greeno Bad Three</h1>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
 render_header()
 

@@ -9,19 +9,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
-from PIL import Image  # needed to load page_icon from file
 
-# ---------- Page config (must be the first Streamlit call) ----------
-def _get_page_icon():
-    # why: Streamlit needs an emoji or a PIL.Image for page_icon
-    if os.path.exists("bama.png"):
-        try:
-            return Image.open("bama.png")
-        except Exception:
-            return "🅰️"
-    return "🅰️"
-
-st.set_page_config(title="Greeno Bad Three", page_icon=_get_page_icon(), layout="wide")
+# Must be the first Streamlit call in the file:
+st.set_page_config(page_title="Greeno Bad Three", page_icon="🐘", layout="wide")
 
 # ---------- PDF extractor ----------
 try:

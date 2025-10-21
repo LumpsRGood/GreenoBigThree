@@ -111,6 +111,31 @@ UI_CSS = """
 </style>
 """
 st.markdown(UI_CSS, unsafe_allow_html=True)
+st.markdown("""
+<style>
+/* Stronger, larger watermark */
+.bg-mark{
+  position: fixed;
+  top: 10px;
+  left: 20px;                 /* keep upper-left; change to right:20px; left:auto; to park it upper-right */
+  width: min(20vw, 420px);    /* was ~9vw — make it noticeably larger */
+  opacity: .18;               /* was .10 — bump visibility */
+  filter: brightness(1.1) saturate(1.1) contrast(1.1)
+          drop-shadow(0 6px 16px rgba(0,0,0,.25));
+  z-index: 0;
+  pointer-events: none;
+}
+/* On narrow screens, let it stay readable */
+@media (max-width: 900px){
+  .bg-mark{
+    width: 44vw;
+    opacity: .22;
+    top: 6px;
+    left: 8px;
+  }
+}
+</style>
+""", unsafe_allow_html=True)
 
 # ---------------- Extraction / cleaning ----------------
 @dataclass

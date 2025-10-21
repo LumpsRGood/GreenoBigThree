@@ -328,9 +328,15 @@ OTHER = [
     "Guest left without ordering","Unknowledgeable","Did not open on time","No/poor apology"
 ]
 CATEGORY_META = {
-    "To-go Missing Complaints": {"labels": MISSING,  "bg": "bg-missing",  "swatch": "#155e75"},
-    "Attitude":                  {"labels": ATTITUDE, "bg": "bg-attitude", "swatch": "#3730a3"},
-    "Other":                     {"labels": OTHER,    "bg": "bg-other",    "swatch": "#334155"}
+    "To-go Missing Complaints": {
+        "labels": MISSING,  "bg": "bg-missing",  "swatch": "#CE0F3D"  # Scarlet
+    },
+    "Attitude": {
+        "labels": ATTITUDE, "bg": "bg-attitude", "swatch": "#B0B7BC"  # Gray
+    },
+    "Other": {
+        "labels": OTHER,    "bg": "bg-other",    "swatch": "#FFFFFF"  # White
+    }
 }
 
 # ── Upload ─────────────────────────────────────────────────────────────────────────
@@ -457,41 +463,40 @@ st.markdown("""
 # === OSU COLORWAY — SCARLET / GRAY / WHITE (paste at END of app.py) ===
 import streamlit as st  # safe to re-import
 
+import streamlit as st  # safe to re-import
+
 st.markdown("""
 <style>
-/* Scarlet for To-go Missing */
+/* To-go Missing → OSU Scarlet */
 .bg-missing{
-  background: linear-gradient(135deg, #8f0000, #BB0000, #d81818) !important; /* deep → scarlet */
+  background: linear-gradient(135deg, #A50E32, #CE0F3D, #E53D62) !important; /* deep → scarlet */
 }
 
-/* Gray for Attitude */
+/* Attitude → OSU Gray (light), switch text to dark for contrast */
 .bg-attitude{
-  background: linear-gradient(135deg, #444444, #666666, #9a9a9a) !important; /* dark → OSU gray */
+  background: linear-gradient(135deg, #9DA5AD, #B0B7BC, #D1D6DA) !important;
+}
+.bg-attitude .title-small,
+.bg-attitude .value{
+  color:#111 !important;
+  text-shadow:none !important;
+  -webkit-text-stroke:0 !important;
 }
 
-/* White for Other (with strong contrast tweaks) */
+/* Other → White with scarlet numbers */
 .bg-other{
-  background: linear-gradient(135deg, #ffffff, #f6f7f8) !important; /* clean white */
+  background: linear-gradient(135deg, #FFFFFF, #F7F8F9) !important;
 }
-.bg-other .title-small{
-  color: #475569 !important;            /* muted label on white */
-  text-shadow: none !important;
-}
+.bg-other .title-small{ color:#2B2F33 !important; text-shadow:none !important; }
 .bg-other .value{
-  color: #BB0000 !important;            /* scarlet digits on white */
-  -webkit-text-stroke: 0.75px rgba(0,0,0,.10) !important;
+  color:#CE0F3D !important;  /* OSU Scarlet */
+  -webkit-text-stroke: .75px rgba(0,0,0,.10) !important;
   text-shadow: 0 2px 6px rgba(0,0,0,.18) !important;
 }
-/* Crisp inner border so white tiles don't blend into the page */
-.bg-other.tile::after{
+/* Crisp inner border so white/gray tiles read on dark bg */
+.bg-other.tile::after,
+.bg-attitude.tile::after{
   box-shadow: inset 0 0 0 1px rgba(0,0,0,.08) !important;
-}
-
-/* Optional: strengthen white text on scarlet/gray */
-.bg-missing .value, .bg-attitude .value,
-.bg-missing .title-small, .bg-attitude .title-small{
-  color: #ffffff !important;
-  text-shadow: 0 1px 2px rgba(0,0,0,.25) !important;
 }
 </style>
 """, unsafe_allow_html=True)

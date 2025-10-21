@@ -1,26 +1,26 @@
 # path: app.py
-# Greeno Bad Three — PDF → Scoreboard (3×7 square tiles, no sidebar/debug)
+# Greeno Bad Three — PDF → Scoreboard (3×7 squares, centered large totals, muted corporate palette)
 
 from __future__ import annotations
 
-import io, os, re, json, unicodedata
+import io, re, os, json, unicodedata
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
 
-# ---------- Page config (must be first Streamlit call) ----------
+# --- Page config must be first ---
 st.set_page_config(page_title="Greeno Bad Three", page_icon="🐘", layout="wide")
 
-# ---------- PDF extractor ----------
+# PDF extractor
 try:
     import pdfplumber
 except Exception:
     st.error("Missing dependency: pdfplumber. Add `pdfplumber` to requirements.txt.")
     st.stop()
 
-# ---------- Locked mapping ----------
+# ---------------------- Locked Mapping ----------------------
 DEFAULT_MAPPING_JSON = r"""
 {
   "case_insensitive": true,
@@ -51,33 +51,26 @@ DEFAULT_MAPPING_JSON = r"""
 }
 """
 
-# ---------- Styles (professional, square tiles) ----------
+# ---------------------- Styles (square tiles; centered large totals; muted palette) ----------------------
 SCOREBOARD_CSS = """
 <style>
-/* 7 columns, 3 rows. Each tile remains square via aspect-ratio. */
-.tiles-row { display: grid; grid-template-columns: repeat(7, 1fr); gap: 10px; margin-bottom: 10px; }
-.tile {
-  position: relative; width: 100%; aspect-ratio: 1 / 1; border-radius: 14px;
-  overflow: hidden; box-shadow: 0 6px 18px rgba(0,0,0,.12), 0 2px 6px rgba(0,0,0,.08);
-}
-.tile-inner {
-  position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: space-between;
-  padding: 10px 12px;
-}
-.title { font-size: .82rem; font-weight: 800; margin: 0; opacity: .98; }
-.value { font-size: 1.9rem; font-weight: 900; line-height: 1; margin: 0; letter-spacing: -0.3px;
-         text-shadow: 0 1px 2px rgba(0,0,0,.25); }
-.loading { display:flex; align-items:center; gap:8px; opacity:.95; }
-.spinner {
-  width:16px; height:16px; border:3px solid rgba(255,255,255,.45);
-  border-top-color:rgba(255,255,255,1); border-radius:50%;
-  animation:spin .9s linear infinite;
-}
+/* Fixed 3×7 grid; squares via aspect-ratio. */
+.tiles-row { display:grid; grid-template-columns:repeat(7,1fr); gap:10px; margin-bottom:10px; }
+.tile { position:relative; width:100%; aspect-ratio:1/1; border-radius:12px; overflow:hidden;
+        box-shadow:0 6px 18px rgba(0,0,0,.10), 0 2px 6px rgba(0,0,0,.06); }
+.tile-inner { position:absolute; inset:0; display:grid; grid-template-rows:auto 1fr; padding:10px 12px; }
+.title { font-size:.78rem; font-weight:800; margin:0; opacity:.98; text-shadow:0 1px 2px rgba(0,0,0,.18); }
+.value-wrap { display:flex; align-items:center; justify-content:center; }
+.value { font-weight:900; line-height:1; margin:0; letter-spacing:-0.5px;
+         font-size:clamp(2.4rem, 5.8vw, 3.6rem); text-shadow:0 2px 4px rgba(0,0,0,.22); }
+.loading { display:flex; align-items:center; justify-content:center; gap:8px; opacity:.92; }
+.spinner { width:18px; height:18px; border:3px solid rgba(255,255,255,.45); border-top-color:#fff;
+           border-radius:50%; animation:spin .9s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 </style>
 """
 
-# ---------- Extraction / cleaning ----------
+# ---------------------- Extraction / cleaning ----------------------
 @dataclass
 class ExtractConfig:
     normalize_unicode: bool = True
@@ -88,20 +81,19 @@ class ExtractConfig:
     drop_footer_lines: int = 0
     remove_page_numbers: bool = True
 
-def extract_pdf_text(file: io.BytesIO) -> Tuple[str, List[str]]:
+def extract_pdf_text(file: io.BytesIO) -> tuple[str, List[str]]:
     pages: List[str] = []
     with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
-            txt = page.extract_text(layout=True) or ""
-            pages.append(txt or "")
+            pages.append(page.extract_text(layout=True) or "")
     return "\n<<<PAGE_BREAK>>>\n".join(pages), pages
 
 def normalize_text(s: str, cfg: ExtractConfig) -> str:
     if cfg.normalize_unicode: s = unicodedata.normalize("NFKC", s)
-    if cfg.hyphenation_fix:   s = re.sub(r"(\w)-\n(\w)", r"\1\2", s)
+    if cfg.hyphenation_fix: s = re.sub(r"(\w)-\n(\w)", r"\1\2", s)  # join hyphen-split words (why: avoid wrap bugs)
     s = s.replace("\r\n","\n").replace("\r","\n")
     if cfg.collapse_whitespace: s = "\n".join(re.sub(r"[ \t]+"," ", ln) for ln in s.split("\n"))
-    if cfg.remove_empty_lines:  s = "\n".join(ln for ln in s.split("\n") if ln.strip())
+    if cfg.remove_empty_lines: s = "\n".join(ln for ln in s.split("\n") if ln.strip())
     return s
 
 def strip_headers_footers(text: str, cfg: ExtractConfig) -> str:
@@ -116,17 +108,17 @@ def strip_headers_footers(text: str, cfg: ExtractConfig) -> str:
 def remove_page_numbers(text: str) -> str:
     keep=[]
     for ln in text.split("\n"):
-        t = ln.strip()
+        t=ln.strip()
         if re.fullmatch(r"Page\s+\d+(?:\s*/\s*\d+)?", t, flags=re.I): continue
         if re.fullmatch(r"\d{1,4}", t): continue
         keep.append(ln)
     return "\n".join(keep)
 
-# ---------- Parser ----------
+# ---------------------- Parser ----------------------
 SECTION_ALIASES = {
-    "delivery": "Delivery","dine in": "Dine-In","dine-in": "Dine-In",
-    "carryout": "Carryout","carry out": "Carryout","takeout": "Takeout",
-    "to go": "To-Go","to-go": "To-Go"
+    "delivery":"Delivery","dine in":"Dine-In","dine-in":"Dine-In",
+    "carryout":"Carryout","carry out":"Carryout","takeout":"Takeout",
+    "to go":"To-Go","to-go":"To-Go"
 }
 SECTION_SYMBOLS = {"Delivery","Dine-In","Dine In","To-Go","To Go","Carryout","Carry Out","Takeout"}
 
@@ -139,15 +131,15 @@ def extract_period_labels(text: str, expected: int = 14) -> List[str]:
         if ("Reason for Contact" in ln) and ("Total" in ln):
             parts = re.findall(r"P\d{1,2}\s+\d{2}", ln)
             if len(parts) >= expected-1:
-                labels = [p.replace(" ","_") for p in parts[:expected-1]]
-                labels.append("Total"); return labels
+                labs = [p.replace(" ","_") for p in parts[:expected-1]]
+                labs.append("Total"); return labs
     return [f"col{i:02d}" for i in range(1, expected+1)]
 
 def metric_line_pattern(ncols: int = 14) -> re.Pattern:
     nums = r"\s+".join([fr"(?P<c{i:02d}>\d+)" for i in range(1, ncols+1)])
     return re.compile(fr"^(?P<metric>[A-Za-z][A-Za-z0-9/'&()\-\s]+?)\s*:?\s+{nums}\s*$")
 
-def parse_matrix_blocks(text: str, ncols: int = 14) -> Tuple[pd.DataFrame, List[str]]:
+def parse_matrix_blocks(text: str, ncols: int = 14) -> tuple[pd.DataFrame, List[str]]:
     labels = extract_period_labels(text, expected=ncols)
     pat = metric_line_pattern(ncols)
     rows: List[Dict[str, Any]] = []
@@ -171,7 +163,7 @@ def parse_matrix_blocks(text: str, ncols: int = 14) -> Tuple[pd.DataFrame, List[
     if not df.empty: df = df[["section","metric"] + labels]
     return df, labels
 
-# ---------- Mapping engine ----------
+# ---------------------- Mapping engine ----------------------
 def load_mapping_constant() -> Dict[str, Any]:
     return json.loads(DEFAULT_MAPPING_JSON)
 
@@ -224,7 +216,7 @@ def pick_latest_period_label(labels: List[str]) -> Optional[str]:
         return int(m.group(2))*100 + int(m.group(1))
     return max(cand, key=key)
 
-# ---------- UI ----------
+# ---------------------- UI ----------------------
 st.markdown("# 📊 Greeno Bad Three — Scoreboard")
 st.caption("Upload the PDF, choose a period, and see totals at a glance.")
 
@@ -250,30 +242,29 @@ latest_label = pick_latest_period_label(labels) or labels[0]
 period_choices = [c for c in labels if c.lower() != "total"]
 period_label = st.selectbox("Period", options=period_choices, index=period_choices.index(latest_label) if latest_label in period_choices else 0)
 
-# Palette (7 high-contrast, reused per row)
+# Muted corporate palette (7 colors; repeats per row)
 PALETTE: List[Tuple[str, str]] = [
-    ("linear-gradient(135deg,#0a84ff,#30d158)", "#ffffff"),  # blue→green
-    ("linear-gradient(135deg,#ff3b30,#ff9500)", "#ffffff"),  # red→orange
-    ("linear-gradient(135deg,#5e5ce6,#64d2ff)", "#ffffff"),  # indigo→cyan
-    ("linear-gradient(135deg,#af52de,#5856d6)", "#ffffff"),  # purples
-    ("linear-gradient(135deg,#34c759,#a8e063)", "#052a0f"),  # greens (dark text)
-    ("linear-gradient(135deg,#ff2d55,#ff375f)", "#ffffff"),  # pinks
-    ("linear-gradient(135deg,#ffd60a,#ff9f0a)", "#1a1200")   # yellows (dark text)
+    ("linear-gradient(135deg,#1e3a8a,#3b82f6)", "#ffffff"),  # navy → blue
+    ("linear-gradient(135deg,#0f766e,#22d3ee)", "#ffffff"),  # teal
+    ("linear-gradient(135deg,#4338ca,#818cf8)", "#ffffff"),  # indigo
+    ("linear-gradient(135deg,#334155,#64748b)", "#ffffff"),  # slate
+    ("linear-gradient(135deg,#065f46,#34d399)", "#ffffff"),  # emerald
+    ("linear-gradient(135deg,#92400e,#f59e0b)", "#1a1200"),  # amber (dark text)
+    ("linear-gradient(135deg,#9f1239,#f472b6)", "#ffffff")   # rose
 ]
 
 st.markdown(SCOREBOARD_CSS, unsafe_allow_html=True)
 mapping_cfg = load_mapping_constant()
 metric_labels = [m["label"] for m in mapping_cfg["metrics"]]
 
-# --- Build fixed 3×7 grid with columns (ensures true grid in Streamlit) ---
+# Build fixed 3×7 grid
 rows = [st.columns(7) for _ in range(3)]
 placeholders: Dict[str, Tuple[st.delta_generator.DeltaGenerator, str, str]] = {}
 
-# Skeleton with spinners
-for idx, lab in enumerate(metric_labels[:21]):  # enforce 21 tiles
-    r = idx // 7
-    c = idx % 7
-    bg, fg = PALETTE[c]  # color by column (consistent across rows)
+# Skeleton tiles (spinner centered)
+for idx, lab in enumerate(metric_labels[:21]):
+    r, c = divmod(idx, 7)
+    bg, fg = PALETTE[c]
     with rows[r][c]:
         ph = st.empty()
         placeholders[lab] = (ph, bg, fg)
@@ -293,7 +284,7 @@ for idx, lab in enumerate(metric_labels[:21]):  # enforce 21 tiles
 with st.spinner("Computing totals…"):
     result_df = apply_mapping(df_wide, labels, mapping_cfg)
 
-# Fill tiles with values
+# Fill values (centered/large)
 for lab in metric_labels[:21]:
     ph, bg, fg = placeholders[lab]
     val = 0
@@ -304,7 +295,7 @@ for lab in metric_labels[:21]:
         <div class="tile" style="background:{bg}; color:{fg}">
           <div class="tile-inner">
             <p class="title">{lab}</p>
-            <p class="value">{val}</p>
+            <div class="value-wrap"><p class="value">{val}</p></div>
           </div>
         </div>
         """,

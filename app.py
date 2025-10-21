@@ -1,5 +1,5 @@
 # path: app.py
-# Greeno Bad Three — PDF → Scoreboard (3×7 compact tiles)
+# Greeno Bad Three — PDF → Scoreboard (3×7 compact tiles, no sidebar/debug)
 
 from __future__ import annotations
 
@@ -9,10 +9,19 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
+from PIL import Image  # needed to load page_icon from file
 
-# ---------- Page config (icon first, before any other Streamlit calls) ----------
-ICON_PATH = "bama.png" if os.path.exists("bama.png") else "🅰️"
-st.set_page_config(title="Greeno Bad Three", page_icon=ICON_PATH, layout="wide")
+# ---------- Page config (must be the first Streamlit call) ----------
+def _get_page_icon():
+    # why: Streamlit needs an emoji or a PIL.Image for page_icon
+    if os.path.exists("bama.png"):
+        try:
+            return Image.open("bama.png")
+        except Exception:
+            return "🅰️"
+    return "🅰️"
+
+st.set_page_config(title="Greeno Bad Three", page_icon=_get_page_icon(), layout="wide")
 
 # ---------- PDF extractor ----------
 try:
@@ -55,27 +64,21 @@ DEFAULT_MAPPING_JSON = r"""
 # ---------- Styles (compact, high-contrast 3×7) ----------
 SCOREBOARD_CSS = """
 <style>
-:root { --tile-h: 120px; }
-.score-grid {
-  display: grid;
-  grid-template-columns: repeat(7, 1fr);
-  gap: 10px;
-}
+:root { --tile-h: 118px; }
+.score-grid { display:grid; grid-template-columns:repeat(7,1fr); gap:10px; }
 .score-card {
-  border-radius: 14px;
-  min-height: var(--tile-h);
-  padding: 10px 12px;
-  display: flex; flex-direction: column; justify-content: space-between;
-  box-shadow: 0 6px 18px rgba(0,0,0,.12), 0 2px 6px rgba(0,0,0,.08);
+  border-radius:14px; min-height:var(--tile-h); padding:10px 12px;
+  display:flex; flex-direction:column; justify-content:space-between;
+  box-shadow:0 6px 18px rgba(0,0,0,.12), 0 2px 6px rgba(0,0,0,.08);
 }
-.score-title { font-size: .82rem; font-weight: 700; margin: 0; opacity: .98; }
-.score-value { font-size: 1.9rem; font-weight: 900; line-height: 1; margin: 0; letter-spacing: -0.3px;
-               text-shadow: 0 1px 2px rgba(0,0,0,.25); }
+.score-title { font-size:.82rem; font-weight:800; margin:0; opacity:.98; }
+.score-value { font-size:1.9rem; font-weight:900; line-height:1; margin:0; letter-spacing:-.3px;
+               text-shadow:0 1px 2px rgba(0,0,0,.25); }
 .loading-row { display:flex; align-items:center; gap:8px; opacity:.95; }
 .spinner {
-  width: 16px; height: 16px; border: 3px solid rgba(255,255,255,.45);
-  border-top-color: rgba(255,255,255,1); border-radius: 50%;
-  animation: spin .9s linear infinite;
+  width:16px; height:16px; border:3px solid rgba(255,255,255,.45);
+  border-top-color:rgba(255,255,255,1); border-radius:50%;
+  animation:spin .9s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 </style>
@@ -269,24 +272,22 @@ st.markdown(SCOREBOARD_CSS, unsafe_allow_html=True)
 mapping_cfg = load_mapping_constant()
 metric_labels = [m["label"] for m in mapping_cfg["metrics"]]
 
-container = st.container()
-with container:
-    st.markdown('<div class="score-grid">', unsafe_allow_html=True)
-    placeholders: Dict[str, Tuple[st.delta_generator.DeltaGenerator, str, str]] = {}
-    for i, lab in enumerate(metric_labels):
-        bg, fg = PALETTE[i % len(PALETTE)]
-        ph = st.empty()
-        placeholders[lab] = (ph, bg, fg)
-        ph.markdown(
-            f'''
-            <div class="score-card" style="background:{bg}; color:{fg}">
-              <p class="score-title">{lab}</p>
-              <div class="loading-row"><div class="spinner"></div><div>loading…</div></div>
-            </div>
-            ''',
-            unsafe_allow_html=True
-        )
-    st.markdown('</div>', unsafe_allow_html=True)
+st.markdown('<div class="score-grid">', unsafe_allow_html=True)
+placeholders: Dict[str, Tuple[st.delta_generator.DeltaGenerator, str, str]] = {}
+for i, lab in enumerate(metric_labels):
+    bg, fg = PALETTE[i % len(PALETTE)]
+    ph = st.empty()
+    placeholders[lab] = (ph, bg, fg)
+    ph.markdown(
+        f'''
+        <div class="score-card" style="background:{bg}; color:{fg}">
+          <p class="score-title">{lab}</p>
+          <div class="loading-row"><div class="spinner"></div><div>loading…</div></div>
+        </div>
+        ''',
+        unsafe_allow_html=True
+    )
+st.markdown('</div>', unsafe_allow_html=True)
 
 with st.spinner("Computing totals…"):
     result_df = apply_mapping(df_wide, labels, mapping_cfg)

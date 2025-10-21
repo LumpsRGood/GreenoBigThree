@@ -146,6 +146,39 @@ st.markdown("""
   }
 }
 </style>
+st.markdown("""
+<style>
+/* Bigger, bolder, higher-contrast numerals */
+.value{
+  font-size: clamp(3.6rem, 9.2vw, 6.6rem);  /* was ~2.6–3.6rem */
+  font-weight: 1000;
+  letter-spacing: -0.4px;
+  line-height: 1;
+  /* soft outline + glow for readability on any gradient */
+  -webkit-text-stroke: 1px rgba(0,0,0,.15);
+  text-shadow:
+     0 2px 6px rgba(0,0,0,.25),
+     0 0 1px rgba(255,255,255,.25);
+}
+
+/* Let the number breathe by reducing internal padding */
+.tile-inner{ padding: 8px 10px; }
+
+/* Make the label a touch smaller so the number dominates */
+.title-small{
+  font-size: .72rem;         /* was .78rem */
+  opacity: .92;
+  margin-bottom: 2px;
+  -webkit-line-clamp: 2;     /* still clamps to two lines */
+}
+
+/* Slightly more space for the number vertically */
+.value-wrap{
+  align-items: center;
+  justify-content: center;
+  padding-top: 4px;
+}
+</style>
 """, unsafe_allow_html=True)
 
 # ---------------- Extraction / cleaning ----------------

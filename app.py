@@ -1,6 +1,6 @@
 # path: app.py
 # Streamlit — PDF → Scoreboard (selected period totals)
-# UI: no sidebar, no debug/diagnostics. Top scoreboard with per-metric spinners.
+# Clean UI: no sidebar, no debug/diagnostics. Top scoreboard with per-metric spinners.
 
 from __future__ import annotations
 
@@ -243,8 +243,10 @@ def remove_page_numbers(text: str) -> str:
     keep = []
     for ln in text.split("\n"):
         t = ln.strip()
-        if re.fullmatch(r"Page\\s+\\d+(?:\\s*/\\s*\\d+)?", t, flags=re.I): continue
-        if re.fullmatch(r"\\d{1,4}", t): continue
+        if re.fullmatch(r"Page\s+\d+(?:\s*/\s*\d+)?", t, flags=re.I):  # FIXED
+            continue
+        if re.fullmatch(r"\d{1,4}", t):  # FIXED
+            continue
         keep.append(ln)
     return "\n".join(keep)
 
@@ -269,7 +271,7 @@ def norm_section(s: Optional[str]) -> Optional[str]:
 def extract_period_labels(text: str, expected: int = 14) -> List[str]:
     for ln in text.splitlines():
         if ("Reason for Contact" in ln) and ("Total" in ln):
-            parts = re.findall(r"P\\d{1,2}\\s+\\d{2}", ln)
+            parts = re.findall(r"P\d{1,2}\s+\d{2}", ln)
             if len(parts) >= expected - 1:
                 labels = [p.replace(" ", "_") for p in parts[: expected - 1]]
                 labels.append("Total")
@@ -277,8 +279,11 @@ def extract_period_labels(text: str, expected: int = 14) -> List[str]:
     return [f"col{i:02d}" for i in range(1, expected + 1)]
 
 def metric_line_pattern(ncols: int = 14) -> re.Pattern:
-    nums = r"\\s+".join([fr"(?P<c{i:02d}>\\d+)" for i in range(1, ncols + 1)])
-    return re.compile(fr"^(?P<metric>[A-Za-z][A-Za-z0-9/'&()\\- ]+?)\\s*:?[\\s]+{nums}\\s*$")
+    # FIXED: proper raw escapes for \d and \s
+    nums = r"\s+".join([fr"(?P<c{i:02d}>\d+)" for i in range(1, ncols + 1)])
+    return re.compile(
+        fr"^(?P<metric>[A-Za-z][A-Za-z0-9/'&()\-\s]+?)\s*:?\s+{nums}\s*$"
+    )
 
 def parse_matrix_blocks(text: str, ncols: int = 14) -> Tuple[pd.DataFrame, List[str]]:
     labels = extract_period_labels(text, expected=ncols)
@@ -317,7 +322,7 @@ def match_metric(name: str, rule: Dict[str, Any], default_ci: bool) -> bool:
     ci = bool(rule.get("case_insensitive", default_ci))
     flags = re.IGNORECASE if ci else 0
     if use_regex:
-        return any(re.search(p, name, flags=flags) for p in pats)  # substring-friendly
+        return any(re.search(p, name, flags=flags) for p in pats)
     return any((p.lower() == name.lower()) if ci else (p == name) for p in pats)
 
 def section_allowed(section: Optional[str], rule: Dict[str, Any]) -> bool:
@@ -343,8 +348,7 @@ def apply_mapping(df: pd.DataFrame, labels: List[str], mapping: Dict[str, Any]) 
         if matched.empty:
             totals = pd.Series({c: 0 for c in labels})
             agg = pd.DataFrame([totals]); agg.insert(0, "label", label)
-            outputs.append(agg)
-            continue
+            outputs.append(agg); continue
         use_cols = [c for c in labels if c in matched.columns]
         if agg_mode == "by_section":
             agg = matched.groupby(["section"], dropna=False)[use_cols].sum(min_count=1).reset_index()
@@ -356,7 +360,6 @@ def apply_mapping(df: pd.DataFrame, labels: List[str], mapping: Dict[str, Any]) 
     if not outputs:
         return pd.DataFrame(columns=["label"] + labels)
     out = pd.concat(outputs, ignore_index=True)
-    # collapse duplicate labels if any
     id_cols = ["label"] + (["section"] if "section" in out.columns else [])
     value_cols = [c for c in out.columns if c not in id_cols]
     out = out.groupby(id_cols, dropna=False)[value_cols].sum(min_count=1).reset_index()
@@ -365,8 +368,7 @@ def apply_mapping(df: pd.DataFrame, labels: List[str], mapping: Dict[str, Any]) 
 
 def pick_latest_period_label(labels: List[str]) -> Optional[str]:
     cand = [lab for lab in labels if lab.lower() != "total"]
-    if not cand:
-        return None
+    if not cand: return None
     def key(lbl: str) -> int:
         m = re.match(r"^P(\d{1,2})_(\d{2})$", lbl)
         if not m: return -1
@@ -407,12 +409,12 @@ with cols[0]:
 with cols[1]:
     period_label = st.selectbox("", options=period_choices, index=period_choices.index(latest_label) if latest_label in period_choices else 0, label_visibility="collapsed")
 
-# Scoreboard skeleton with spinners
+# Scoreboard CSS and placeholders
+st.markdown(SCOREBOARD_CSS, unsafe_allow_html=True)
 mapping_cfg = load_mapping_constant()
 metric_rules: List[Dict[str, Any]] = mapping_cfg.get("metrics", [])
 metric_labels = [r["label"] for r in metric_rules]
 
-st.markdown(SCOREBOARD_CSS, unsafe_allow_html=True)
 grid = st.container()
 with grid:
     st.markdown('<div class="score-grid">', unsafe_allow_html=True)
@@ -428,7 +430,7 @@ with grid:
         ''', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-# Compute all totals once
+# Compute totals once
 with st.spinner("Computing totals…"):
     result_df = apply_mapping(df_wide, labels, mapping_cfg)
 

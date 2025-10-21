@@ -410,41 +410,41 @@ for title, meta in CATEGORY_META.items():
     row_ph[title].markdown(render_row_html(title, meta["bg"], meta["swatch"], items, loading=False),
                            unsafe_allow_html=True)
                            # === SCORE NUMBERS — BIG + CONTAINER-RESPONSIVE (paste at end) ===
+# === SCORE NUMBERS — FINAL OVERRIDE (paste at end of app.py) ===
 import streamlit as st  # safe to re-import
 
 st.markdown("""
 <style>
-/* Slightly wider tiles so big digits have room */
-.row-inner{ grid-template-columns: repeat(7, minmax(140px, 1fr)); }
+/* Wider tiles so big digits have room */
+.row-inner{
+  grid-template-columns: repeat(7, minmax(160px, 1fr)) !important; /* was ~110–140px */
+}
 
-/* Let font-size scale to the tile width (container queries) */
-.tile{ container-type: inline-size; }
-
-/* Numbers: scale to tile, stay on one line, stronger contrast */
+/* Make the number dominate & guarantee the cascade wins */
 .value{
   white-space: nowrap;
   line-height: 1;
   font-weight: 1000;
   letter-spacing: -0.5px;
+
+  /* BIG size with hard override */
+  font-size: clamp(5rem, 12vw, 9rem) !important;
+
+  /* Contrast so it pops on gradients */
   -webkit-text-stroke: 1.25px rgba(0,0,0,.20);
   text-shadow: 0 3px 8px rgba(0,0,0,.35), 0 0 1px rgba(255,255,255,.28);
-
-  /* Fallback (viewport-based) for older browsers */
-  font-size: clamp(4.2rem, 11vw, 8rem);
-
-  /* Preferred: container-aware sizing (supported in modern browsers) */
-  font-size: clamp(3.6rem, 28cqi, 9rem);
 }
 
-/* Make label smaller so the number dominates */
+/* Let the number breathe */
+.tile-inner{ padding: 6px 8px !important; }
+.value-wrap{ align-items: center; justify-content: center; padding-top: 0 !important; }
+
+/* Shrink label so numbers own the tile */
 .title-small{
-  font-size: .66rem;
+  font-size: .62rem !important;
   opacity: .90;
   margin-bottom: 2px;
-  -webkit-line-clamp: 1;  /* one line label */
+  -webkit-line-clamp: 1;
 }
-
-/* Slightly tighter padding so the number gets more space */
-.tile-inner{ padding: 8px 10px; }
 </style>
 """, unsafe_allow_html=True)

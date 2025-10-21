@@ -1,32 +1,27 @@
 # path: app.py
-# Greeno Bad Three — PDF → Scoreboard (selected period totals)
-# Clean UI: no sidebar/debug. Compact colorful 3×7 tiles with spinners → totals.
+# Greeno Bad Three — PDF → Scoreboard (3×7 compact tiles)
 
 from __future__ import annotations
 
-import io
-import json
-import re
-import os
-import unicodedata
+import io, os, re, json, unicodedata
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
 
-# ---- Page config (use uploaded bama.png if present) ----
+# ---------- Page config (icon first, before any other Streamlit calls) ----------
 ICON_PATH = "bama.png" if os.path.exists("bama.png") else "🅰️"
 st.set_page_config(title="Greeno Bad Three", page_icon=ICON_PATH, layout="wide")
 
-# ---- PDF extractor ----
+# ---------- PDF extractor ----------
 try:
     import pdfplumber
 except Exception:
     st.error("Missing dependency: pdfplumber. Add `pdfplumber` to requirements.txt.")
     st.stop()
 
-# ---- Locked Mapping (JSON, no comments) ----
+# ---------- Locked mapping ----------
 DEFAULT_MAPPING_JSON = r"""
 {
   "case_insensitive": true,
@@ -57,50 +52,42 @@ DEFAULT_MAPPING_JSON = r"""
 }
 """
 
-# ---- Styles — compact colorful 3×7 tiles ----
+# ---------- Styles (compact, high-contrast 3×7) ----------
 SCOREBOARD_CSS = """
 <style>
-:root { --tile-h: 140px; } /* compact */
+:root { --tile-h: 120px; }
 .score-grid {
   display: grid;
-  grid-template-columns: repeat(7, 1fr); /* exactly 7 per row */
-  gap: 12px;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 10px;
 }
 .score-card {
   border-radius: 14px;
   min-height: var(--tile-h);
-  padding: 12px 14px;
+  padding: 10px 12px;
   display: flex; flex-direction: column; justify-content: space-between;
-  box-shadow: 0 6px 18px rgba(0,0,0,0.12), 0 2px 6px rgba(0,0,0,0.08);
+  box-shadow: 0 6px 18px rgba(0,0,0,.12), 0 2px 6px rgba(0,0,0,.08);
 }
-.score-title {
-  font-size: 0.85rem; font-weight: 700; letter-spacing: .1px;
-  opacity: 0.95; margin: 0;
-}
-.score-value {
-  font-size: 2.1rem; font-weight: 900; line-height: 1;
-  letter-spacing: -0.5px; margin: 0;
-  text-shadow: 0 1px 2px rgba(0,0,0,0.25); /* pop */
-}
-.loading-row { display: flex; align-items: center; gap: 8px; opacity: .95; }
+.score-title { font-size: .82rem; font-weight: 700; margin: 0; opacity: .98; }
+.score-value { font-size: 1.9rem; font-weight: 900; line-height: 1; margin: 0; letter-spacing: -0.3px;
+               text-shadow: 0 1px 2px rgba(0,0,0,.25); }
+.loading-row { display:flex; align-items:center; gap:8px; opacity:.95; }
 .spinner {
-  width: 18px; height: 18px; border: 3px solid rgba(255,255,255,0.45);
+  width: 16px; height: 16px; border: 3px solid rgba(255,255,255,.45);
   border-top-color: rgba(255,255,255,1); border-radius: 50%;
-  animation: spin 0.9s linear infinite;
+  animation: spin .9s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
-@media (max-width: 1280px) { :root { --tile-h: 130px; } }
-@media (max-width: 1024px) { :root { --tile-h: 120px; } }
 </style>
 """
 
-# ---- Extraction / cleaning ----
+# ---------- Extraction / cleaning ----------
 @dataclass
 class ExtractConfig:
     normalize_unicode: bool = True
     collapse_whitespace: bool = True
     remove_empty_lines: bool = True
-    hyphenation_fix: bool = True   # join "In-volved"
+    hyphenation_fix: bool = True
     drop_header_lines: int = 0
     drop_footer_lines: int = 0
     remove_page_numbers: bool = True
@@ -139,11 +126,11 @@ def remove_page_numbers(text: str) -> str:
         keep.append(ln)
     return "\n".join(keep)
 
-# ---- Parser ----
+# ---------- Parser ----------
 SECTION_ALIASES = {
-    "delivery": "Delivery", "dine in": "Dine-In", "dine-in": "Dine-In",
-    "carryout": "Carryout", "carry out": "Carryout",
-    "takeout": "Takeout", "to go": "To-Go", "to-go": "To-Go"
+    "delivery": "Delivery","dine in": "Dine-In","dine-in": "Dine-In",
+    "carryout": "Carryout","carry out": "Carryout","takeout": "Takeout",
+    "to go": "To-Go","to-go": "To-Go"
 }
 SECTION_SYMBOLS = {"Delivery","Dine-In","Dine In","To-Go","To Go","Carryout","Carry Out","Takeout"}
 
@@ -188,7 +175,7 @@ def parse_matrix_blocks(text: str, ncols: int = 14) -> Tuple[pd.DataFrame, List[
     if not df.empty: df = df[["section","metric"] + labels]
     return df, labels
 
-# ---- Mapping engine ----
+# ---------- Mapping engine ----------
 def load_mapping_constant() -> Dict[str, Any]:
     return json.loads(DEFAULT_MAPPING_JSON)
 
@@ -199,7 +186,7 @@ def match_metric(name: str, rule: Dict[str, Any], default_ci: bool) -> bool:
     ci = bool(rule.get("case_insensitive", default_ci))
     flags = re.IGNORECASE if ci else 0
     if use_regex:
-        return any(re.search(p, name, flags=flags) for p in pats)  # substring-friendly
+        return any(re.search(p, name, flags=flags) for p in pats)
     return any((p.lower()==name.lower()) if ci else (p==name) for p in pats)
 
 def section_allowed(section: Optional[str], rule: Dict[str, Any]) -> bool:
@@ -241,7 +228,7 @@ def pick_latest_period_label(labels: List[str]) -> Optional[str]:
         return int(m.group(2))*100 + int(m.group(1))
     return max(cand, key=key)
 
-# ---- UI (no sidebar) ----
+# ---------- UI ----------
 st.markdown("# 📊 Greeno Bad Three — Scoreboard")
 st.caption("Upload the PDF, choose a period, and see totals at a glance.")
 
@@ -267,29 +254,27 @@ latest_label = pick_latest_period_label(labels) or labels[0]
 period_choices = [c for c in labels if c.lower() != "total"]
 period_label = st.selectbox("Period", options=period_choices, index=period_choices.index(latest_label) if latest_label in period_choices else 0)
 
-# Palette (bg, text) — 7 high-contrast gradients repeated for 21 tiles
+# palette: intense but professional, high contrast text
 PALETTE: List[Tuple[str, str]] = [
-    ("linear-gradient(135deg,#ff3b30,#ff9500)", "#ffffff"),  # red→orange
-    ("linear-gradient(135deg,#0a84ff,#30d158)", "#ffffff"),  # blue→green
-    ("linear-gradient(135deg,#af52de,#5856d6)", "#ffffff"),  # purple duo
-    ("linear-gradient(135deg,#ff2d55,#ff375f)", "#ffffff"),  # pinks
-    ("linear-gradient(135deg,#5e5ce6,#64d2ff)", "#ffffff"),  # indigo→cyan
-    ("linear-gradient(135deg,#34c759,#a8e063)", "#052a0f"),  # greens
-    ("linear-gradient(135deg,#ffd60a,#ff9f0a)", "#1a1200")   # yellows
+    ("linear-gradient(135deg,#ff3b30,#ff9500)", "#ffffff"),
+    ("linear-gradient(135deg,#0a84ff,#30d158)", "#ffffff"),
+    ("linear-gradient(135deg,#af52de,#5856d6)", "#ffffff"),
+    ("linear-gradient(135deg,#ff2d55,#ff375f)", "#ffffff"),
+    ("linear-gradient(135deg,#5e5ce6,#64d2ff)", "#ffffff"),
+    ("linear-gradient(135deg,#34c759,#a8e063)", "#052a0f"),
+    ("linear-gradient(135deg,#ffd60a,#ff9f0a)", "#1a1200")
 ]
 
-# Scoreboard skeleton
 st.markdown(SCOREBOARD_CSS, unsafe_allow_html=True)
 mapping_cfg = load_mapping_constant()
-metric_rules: List[Dict[str, Any]] = mapping_cfg.get("metrics", [])
-metric_labels = [r["label"] for r in metric_rules]
+metric_labels = [m["label"] for m in mapping_cfg["metrics"]]
 
-grid = st.container()
-with grid:
+container = st.container()
+with container:
     st.markdown('<div class="score-grid">', unsafe_allow_html=True)
-    placeholders: Dict[str, st.delta_generator.DeltaGenerator] = {}
-    for idx, lab in enumerate(metric_labels):
-        bg, fg = PALETTE[idx % len(PALETTE)]
+    placeholders: Dict[str, Tuple[st.delta_generator.DeltaGenerator, str, str]] = {}
+    for i, lab in enumerate(metric_labels):
+        bg, fg = PALETTE[i % len(PALETTE)]
         ph = st.empty()
         placeholders[lab] = (ph, bg, fg)
         ph.markdown(
@@ -303,11 +288,9 @@ with grid:
         )
     st.markdown('</div>', unsafe_allow_html=True)
 
-# Compute totals once
 with st.spinner("Computing totals…"):
     result_df = apply_mapping(df_wide, labels, mapping_cfg)
 
-# Fill tiles
 for lab in metric_labels:
     ph, bg, fg = placeholders[lab]
     val = 0

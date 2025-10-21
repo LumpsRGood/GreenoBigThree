@@ -1,5 +1,5 @@
 # path: app.py
-# Greeno Bad Three — PDF → Scoreboard (3×7 compact tiles, no sidebar/debug)
+# Greeno Bad Three — PDF → Scoreboard (3×7 square tiles, no sidebar/debug)
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 import streamlit as st
 
-# Must be the first Streamlit call in the file:
+# ---------- Page config (must be first Streamlit call) ----------
 st.set_page_config(page_title="Greeno Bad Three", page_icon="🐘", layout="wide")
 
 # ---------- PDF extractor ----------
@@ -51,20 +51,23 @@ DEFAULT_MAPPING_JSON = r"""
 }
 """
 
-# ---------- Styles (compact, high-contrast 3×7) ----------
+# ---------- Styles (professional, square tiles) ----------
 SCOREBOARD_CSS = """
 <style>
-:root { --tile-h: 118px; }
-.score-grid { display:grid; grid-template-columns:repeat(7,1fr); gap:10px; }
-.score-card {
-  border-radius:14px; min-height:var(--tile-h); padding:10px 12px;
-  display:flex; flex-direction:column; justify-content:space-between;
-  box-shadow:0 6px 18px rgba(0,0,0,.12), 0 2px 6px rgba(0,0,0,.08);
+/* 7 columns, 3 rows. Each tile remains square via aspect-ratio. */
+.tiles-row { display: grid; grid-template-columns: repeat(7, 1fr); gap: 10px; margin-bottom: 10px; }
+.tile {
+  position: relative; width: 100%; aspect-ratio: 1 / 1; border-radius: 14px;
+  overflow: hidden; box-shadow: 0 6px 18px rgba(0,0,0,.12), 0 2px 6px rgba(0,0,0,.08);
 }
-.score-title { font-size:.82rem; font-weight:800; margin:0; opacity:.98; }
-.score-value { font-size:1.9rem; font-weight:900; line-height:1; margin:0; letter-spacing:-.3px;
-               text-shadow:0 1px 2px rgba(0,0,0,.25); }
-.loading-row { display:flex; align-items:center; gap:8px; opacity:.95; }
+.tile-inner {
+  position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: space-between;
+  padding: 10px 12px;
+}
+.title { font-size: .82rem; font-weight: 800; margin: 0; opacity: .98; }
+.value { font-size: 1.9rem; font-weight: 900; line-height: 1; margin: 0; letter-spacing: -0.3px;
+         text-shadow: 0 1px 2px rgba(0,0,0,.25); }
+.loading { display:flex; align-items:center; gap:8px; opacity:.95; }
 .spinner {
   width:16px; height:16px; border:3px solid rgba(255,255,255,.45);
   border-top-color:rgba(255,255,255,1); border-radius:50%;
@@ -247,52 +250,63 @@ latest_label = pick_latest_period_label(labels) or labels[0]
 period_choices = [c for c in labels if c.lower() != "total"]
 period_label = st.selectbox("Period", options=period_choices, index=period_choices.index(latest_label) if latest_label in period_choices else 0)
 
-# palette: intense but professional, high contrast text
+# Palette (7 high-contrast, reused per row)
 PALETTE: List[Tuple[str, str]] = [
-    ("linear-gradient(135deg,#ff3b30,#ff9500)", "#ffffff"),
-    ("linear-gradient(135deg,#0a84ff,#30d158)", "#ffffff"),
-    ("linear-gradient(135deg,#af52de,#5856d6)", "#ffffff"),
-    ("linear-gradient(135deg,#ff2d55,#ff375f)", "#ffffff"),
-    ("linear-gradient(135deg,#5e5ce6,#64d2ff)", "#ffffff"),
-    ("linear-gradient(135deg,#34c759,#a8e063)", "#052a0f"),
-    ("linear-gradient(135deg,#ffd60a,#ff9f0a)", "#1a1200")
+    ("linear-gradient(135deg,#0a84ff,#30d158)", "#ffffff"),  # blue→green
+    ("linear-gradient(135deg,#ff3b30,#ff9500)", "#ffffff"),  # red→orange
+    ("linear-gradient(135deg,#5e5ce6,#64d2ff)", "#ffffff"),  # indigo→cyan
+    ("linear-gradient(135deg,#af52de,#5856d6)", "#ffffff"),  # purples
+    ("linear-gradient(135deg,#34c759,#a8e063)", "#052a0f"),  # greens (dark text)
+    ("linear-gradient(135deg,#ff2d55,#ff375f)", "#ffffff"),  # pinks
+    ("linear-gradient(135deg,#ffd60a,#ff9f0a)", "#1a1200")   # yellows (dark text)
 ]
 
 st.markdown(SCOREBOARD_CSS, unsafe_allow_html=True)
 mapping_cfg = load_mapping_constant()
 metric_labels = [m["label"] for m in mapping_cfg["metrics"]]
 
-st.markdown('<div class="score-grid">', unsafe_allow_html=True)
+# --- Build fixed 3×7 grid with columns (ensures true grid in Streamlit) ---
+rows = [st.columns(7) for _ in range(3)]
 placeholders: Dict[str, Tuple[st.delta_generator.DeltaGenerator, str, str]] = {}
-for i, lab in enumerate(metric_labels):
-    bg, fg = PALETTE[i % len(PALETTE)]
-    ph = st.empty()
-    placeholders[lab] = (ph, bg, fg)
-    ph.markdown(
-        f'''
-        <div class="score-card" style="background:{bg}; color:{fg}">
-          <p class="score-title">{lab}</p>
-          <div class="loading-row"><div class="spinner"></div><div>loading…</div></div>
-        </div>
-        ''',
-        unsafe_allow_html=True
-    )
-st.markdown('</div>', unsafe_allow_html=True)
 
+# Skeleton with spinners
+for idx, lab in enumerate(metric_labels[:21]):  # enforce 21 tiles
+    r = idx // 7
+    c = idx % 7
+    bg, fg = PALETTE[c]  # color by column (consistent across rows)
+    with rows[r][c]:
+        ph = st.empty()
+        placeholders[lab] = (ph, bg, fg)
+        ph.markdown(
+            f"""
+            <div class="tile" style="background:{bg}; color:{fg}">
+              <div class="tile-inner">
+                <p class="title">{lab}</p>
+                <div class="loading"><div class="spinner"></div><div>loading…</div></div>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+# Compute totals once
 with st.spinner("Computing totals…"):
     result_df = apply_mapping(df_wide, labels, mapping_cfg)
 
-for lab in metric_labels:
+# Fill tiles with values
+for lab in metric_labels[:21]:
     ph, bg, fg = placeholders[lab]
     val = 0
     if (not result_df.empty) and (lab in result_df["label"].values) and (period_label in result_df.columns):
         val = int(result_df.loc[result_df["label"] == lab, period_label].sum())
     ph.markdown(
-        f'''
-        <div class="score-card" style="background:{bg}; color:{fg}">
-          <p class="score-title">{lab}</p>
-          <p class="score-value">{val}</p>
+        f"""
+        <div class="tile" style="background:{bg}; color:{fg}">
+          <div class="tile-inner">
+            <p class="title">{lab}</p>
+            <p class="value">{val}</p>
+          </div>
         </div>
-        ''',
+        """,
         unsafe_allow_html=True
     )

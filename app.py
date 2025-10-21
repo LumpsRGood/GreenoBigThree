@@ -113,25 +113,35 @@ UI_CSS = """
 st.markdown(UI_CSS, unsafe_allow_html=True)
 st.markdown("""
 <style>
-/* Stronger, larger watermark */
+/* Centered, responsive watermark */
 .bg-mark{
   position: fixed;
-  top: 10px;
-  left: 20px;                 /* keep upper-left; change to right:20px; left:auto; to park it upper-right */
-  width: min(20vw, 420px);    /* was ~9vw — make it noticeably larger */
-  opacity: .18;               /* was .10 — bump visibility */
-  filter: brightness(1.1) saturate(1.1) contrast(1.1)
+  top: 14px;                 /* push down a touch so it's never clipped */
+  left: 50%;                 /* center horizontally */
+  transform: translateX(-50%);
+  width: clamp(320px, 36vw, 680px);   /* scales with screen, but bounded */
+  max-height: 34vh;          /* never taller than ~1/3 of the viewport */
+  opacity: .16;              /* muted but visible */
+  filter: brightness(1.1) saturate(1.05) contrast(1.1)
           drop-shadow(0 6px 16px rgba(0,0,0,.25));
   z-index: 0;
   pointer-events: none;
 }
-/* On narrow screens, let it stay readable */
+.bg-mark img{
+  display:block;
+  width:100%;
+  height:auto;
+  object-fit: contain;       /* prevent any cropping inside the box */
+  border-radius: 12px;       /* optional: rounds it slightly */
+}
+
+/* Tune for small screens */
 @media (max-width: 900px){
   .bg-mark{
-    width: 44vw;
-    opacity: .22;
-    top: 6px;
-    left: 8px;
+    top: 8px;
+    width: clamp(240px, 60vw, 520px);
+    max-height: 28vh;
+    opacity: .18;
   }
 }
 </style>

@@ -454,3 +454,44 @@ st.markdown("""
 .value-wrap{ align-items: center; justify-content: center; padding-top: 2px !important; }
 </style>
 """, unsafe_allow_html=True)
+# === OSU COLORWAY — SCARLET / GRAY / WHITE (paste at END of app.py) ===
+import streamlit as st  # safe to re-import
+
+st.markdown("""
+<style>
+/* Scarlet for To-go Missing */
+.bg-missing{
+  background: linear-gradient(135deg, #8f0000, #BB0000, #d81818) !important; /* deep → scarlet */
+}
+
+/* Gray for Attitude */
+.bg-attitude{
+  background: linear-gradient(135deg, #444444, #666666, #9a9a9a) !important; /* dark → OSU gray */
+}
+
+/* White for Other (with strong contrast tweaks) */
+.bg-other{
+  background: linear-gradient(135deg, #ffffff, #f6f7f8) !important; /* clean white */
+}
+.bg-other .title-small{
+  color: #475569 !important;            /* muted label on white */
+  text-shadow: none !important;
+}
+.bg-other .value{
+  color: #BB0000 !important;            /* scarlet digits on white */
+  -webkit-text-stroke: 0.75px rgba(0,0,0,.10) !important;
+  text-shadow: 0 2px 6px rgba(0,0,0,.18) !important;
+}
+/* Crisp inner border so white tiles don't blend into the page */
+.bg-other.tile::after{
+  box-shadow: inset 0 0 0 1px rgba(0,0,0,.08) !important;
+}
+
+/* Optional: strengthen white text on scarlet/gray */
+.bg-missing .value, .bg-attitude .value,
+.bg-missing .title-small, .bg-attitude .title-small{
+  color: #ffffff !important;
+  text-shadow: 0 1px 2px rgba(0,0,0,.25) !important;
+}
+</style>
+""", unsafe_allow_html=True)

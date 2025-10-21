@@ -1,11 +1,13 @@
 # path: app.py
-# Streamlit — "Greeno Bad Three" • Pretty square scoreboard, no sidebar/debug
+# Greeno Bad Three — PDF → Scoreboard (selected period totals)
+# Clean UI: no sidebar/debug. Compact colorful 3×7 tiles with spinners → totals.
 
 from __future__ import annotations
 
 import io
 import json
 import re
+import os
 import unicodedata
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
@@ -13,18 +15,18 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 import streamlit as st
 
-# --- Page chrome ---
-ALABAMA_A_ICON_URL = "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5b/Alabama_A_logo.png/240px-Alabama_A_logo.png"
-st.set_page_config(page_title="Greeno Bad Three", page_icon=ALABAMA_A_ICON_URL, layout="wide")
+# ---- Page config (use uploaded bama.png if present) ----
+ICON_PATH = "bama.png" if os.path.exists("bama.png") else "🅰️"
+st.set_page_config(title="Greeno Bad Three", page_icon=ICON_PATH, layout="wide")
 
-# PDF extractor
+# ---- PDF extractor ----
 try:
     import pdfplumber
 except Exception:
     st.error("Missing dependency: pdfplumber. Add `pdfplumber` to requirements.txt.")
     st.stop()
 
-# ---------------------- Locked Mapping (JSON, no comments) ----------------------
+# ---- Locked Mapping (JSON, no comments) ----
 DEFAULT_MAPPING_JSON = r"""
 {
   "case_insensitive": true,
@@ -55,89 +57,50 @@ DEFAULT_MAPPING_JSON = r"""
 }
 """
 
-# ---------------------- Styles: square colorful scorebugs ----------------------
+# ---- Styles — compact colorful 3×7 tiles ----
 SCOREBOARD_CSS = """
 <style>
-:root {
-  --card-radius: 18px;
-}
+:root { --tile-h: 140px; } /* compact */
 .score-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(7, 1fr); /* exactly 7 per row */
+  gap: 12px;
 }
 .score-card {
-  position: relative;
-  border-radius: var(--card-radius);
-  aspect-ratio: 1 / 1;
-  color: white;
-  padding: 14px;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  box-shadow: 0 4px 12px rgba(0,0,0,.12);
+  border-radius: 14px;
+  min-height: var(--tile-h);
+  padding: 12px 14px;
+  display: flex; flex-direction: column; justify-content: space-between;
+  box-shadow: 0 6px 18px rgba(0,0,0,0.12), 0 2px 6px rgba(0,0,0,0.08);
 }
 .score-title {
-  font-size: 0.78rem;
-  font-weight: 600;
-  letter-spacing: .2px;
-  line-height: 1.15;
-  margin: 0;
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  text-shadow: 0 1px 1px rgba(0,0,0,.25);
+  font-size: 0.85rem; font-weight: 700; letter-spacing: .1px;
+  opacity: 0.95; margin: 0;
 }
 .score-value {
-  font-size: 2.1rem;
-  font-weight: 800;
-  line-height: 1;
-  text-align: right;
-  text-shadow: 0 2px 4px rgba(0,0,0,.35);
+  font-size: 2.1rem; font-weight: 900; line-height: 1;
+  letter-spacing: -0.5px; margin: 0;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.25); /* pop */
 }
+.loading-row { display: flex; align-items: center; gap: 8px; opacity: .95; }
 .spinner {
-  width: 22px; height: 22px;
-  border: 3px solid rgba(255,255,255,.35);
-  border-top-color: rgba(255,255,255,.95);
-  border-radius: 50%;
-  animation: spin .9s linear infinite;
-  margin-right: 8px;
+  width: 18px; height: 18px; border: 3px solid rgba(255,255,255,0.45);
+  border-top-color: rgba(255,255,255,1); border-radius: 50%;
+  animation: spin 0.9s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
-.loading {
-  display: flex; align-items: center; justify-content: flex-end; gap: 8px;
-  color: rgba(255,255,255,.9);
-  font-weight: 700;
-}
-.bg-1 { background: linear-gradient(135deg, #6EE7B7, #3B82F6); }
-.bg-2 { background: linear-gradient(135deg, #F59E0B, #EF4444); }
-.bg-3 { background: linear-gradient(135deg, #A78BFA, #EC4899); }
-.bg-4 { background: linear-gradient(135deg, #34D399, #10B981); }
-.bg-5 { background: linear-gradient(135deg, #F472B6, #8B5CF6); }
-.bg-6 { background: linear-gradient(135deg, #22D3EE, #3B82F6); }
-.bg-7 { background: linear-gradient(135deg, #F43F5E, #F97316); }
-.bg-8 { background: linear-gradient(135deg, #60A5FA, #2563EB); }
-.bg-9 { background: linear-gradient(135deg, #84CC16, #22C55E); }
-.bg-10{ background: linear-gradient(135deg, #FDE047, #F59E0B); }
-.card-inner { height: 100%; display:flex; flex-direction:column; justify-content:space-between; }
-.header-row { display:flex; align-items:flex-start; justify-content:space-between; gap:8px; }
-.logo-badge {
-  width: 26px; height: 26px; border-radius: 8px;
-  background: rgba(255,255,255,.22); display:flex; align-items:center; justify-content:center;
-  font-weight: 800; color: rgba(255,255,255,.95);
-}
+@media (max-width: 1280px) { :root { --tile-h: 130px; } }
+@media (max-width: 1024px) { :root { --tile-h: 120px; } }
 </style>
 """
 
-# ---------------------- Extraction / cleaning ----------------------
+# ---- Extraction / cleaning ----
 @dataclass
 class ExtractConfig:
     normalize_unicode: bool = True
     collapse_whitespace: bool = True
     remove_empty_lines: bool = True
-    hyphenation_fix: bool = True
+    hyphenation_fix: bool = True   # join "In-volved"
     drop_header_lines: int = 0
     drop_footer_lines: int = 0
     remove_page_numbers: bool = True
@@ -151,31 +114,24 @@ def extract_pdf_text(file: io.BytesIO) -> Tuple[str, List[str]]:
     return "\n<<<PAGE_BREAK>>>\n".join(pages), pages
 
 def normalize_text(s: str, cfg: ExtractConfig) -> str:
-    if cfg.normalize_unicode:
-        s = unicodedata.normalize("NFKC", s)
-    if cfg.hyphenation_fix:
-        s = re.sub(r"(\w)-\n(\w)", r"\1\2", s)
-    s = s.replace("\r\n", "\n").replace("\r", "\n")
-    if cfg.collapse_whitespace:
-        s = "\n".join(re.sub(r"[ \t]+", " ", ln) for ln in s.split("\n"))
-    if cfg.remove_empty_lines:
-        s = "\n".join([ln for ln in s.split("\n") if ln.strip()])
+    if cfg.normalize_unicode: s = unicodedata.normalize("NFKC", s)
+    if cfg.hyphenation_fix:   s = re.sub(r"(\w)-\n(\w)", r"\1\2", s)
+    s = s.replace("\r\n","\n").replace("\r","\n")
+    if cfg.collapse_whitespace: s = "\n".join(re.sub(r"[ \t]+"," ", ln) for ln in s.split("\n"))
+    if cfg.remove_empty_lines:  s = "\n".join(ln for ln in s.split("\n") if ln.strip())
     return s
 
 def strip_headers_footers(text: str, cfg: ExtractConfig) -> str:
-    chunks = text.split("\n<<<PAGE_BREAK>>>\n")
-    out = []
+    chunks = text.split("\n<<<PAGE_BREAK>>>\n"); out=[]
     for ch in chunks:
         lines = ch.split("\n")
-        if cfg.drop_header_lines > 0:
-            lines = lines[cfg.drop_header_lines:]
-        if cfg.drop_footer_lines > 0 and cfg.drop_footer_lines < len(lines):
-            lines = lines[:-cfg.drop_footer_lines]
+        if cfg.drop_header_lines>0: lines = lines[cfg.drop_header_lines:]
+        if cfg.drop_footer_lines>0 and cfg.drop_footer_lines<len(lines): lines = lines[:-cfg.drop_footer_lines]
         out.append("\n".join(lines))
     return "\n<<<PAGE_BREAK>>>\n".join(out)
 
 def remove_page_numbers(text: str) -> str:
-    keep = []
+    keep=[]
     for ln in text.split("\n"):
         t = ln.strip()
         if re.fullmatch(r"Page\s+\d+(?:\s*/\s*\d+)?", t, flags=re.I): continue
@@ -183,16 +139,11 @@ def remove_page_numbers(text: str) -> str:
         keep.append(ln)
     return "\n".join(keep)
 
-# ---------------------- Parser ----------------------
+# ---- Parser ----
 SECTION_ALIASES = {
-    "delivery": "Delivery",
-    "dine in": "Dine-In",
-    "dine-in": "Dine-In",
-    "carryout": "Carryout",
-    "carry out": "Carryout",
-    "takeout": "Takeout",
-    "to go": "To-Go",
-    "to-go": "To-Go"
+    "delivery": "Delivery", "dine in": "Dine-In", "dine-in": "Dine-In",
+    "carryout": "Carryout", "carry out": "Carryout",
+    "takeout": "Takeout", "to go": "To-Go", "to-go": "To-Go"
 }
 SECTION_SYMBOLS = {"Delivery","Dine-In","Dine In","To-Go","To Go","Carryout","Carry Out","Takeout"}
 
@@ -204,14 +155,13 @@ def extract_period_labels(text: str, expected: int = 14) -> List[str]:
     for ln in text.splitlines():
         if ("Reason for Contact" in ln) and ("Total" in ln):
             parts = re.findall(r"P\d{1,2}\s+\d{2}", ln)
-            if len(parts) >= expected - 1:
-                labels = [p.replace(" ", "_") for p in parts[: expected - 1]]
-                labels.append("Total")
-                return labels
-    return [f"col{i:02d}" for i in range(1, expected + 1)]
+            if len(parts) >= expected-1:
+                labels = [p.replace(" ","_") for p in parts[:expected-1]]
+                labels.append("Total"); return labels
+    return [f"col{i:02d}" for i in range(1, expected+1)]
 
 def metric_line_pattern(ncols: int = 14) -> re.Pattern:
-    nums = r"\s+".join([fr"(?P<c{i:02d}>\d+)" for i in range(1, ncols + 1)])
+    nums = r"\s+".join([fr"(?P<c{i:02d}>\d+)" for i in range(1, ncols+1)])
     return re.compile(fr"^(?P<metric>[A-Za-z][A-Za-z0-9/'&()\-\s]+?)\s*:?\s+{nums}\s*$")
 
 def parse_matrix_blocks(text: str, ncols: int = 14) -> Tuple[pd.DataFrame, List[str]]:
@@ -228,18 +178,17 @@ def parse_matrix_blocks(text: str, ncols: int = 14) -> Tuple[pd.DataFrame, List[
         if not m: continue
         gd = m.groupdict()
         metric_name = gd.pop("metric").rstrip(":").strip()
-        vals = [gd[f"c{i:02d}"] for i in range(1, ncols + 1)]
+        vals = [gd[f"c{i:02d}"] for i in range(1, ncols+1)]
         row = {"section": norm_section(section), "metric": metric_name}
         for j, lab in enumerate(labels):
             v = vals[j]
-            row[lab] = int(v) if v is not None and v.isdigit() else None
+            row[lab] = int(v) if v and v.isdigit() else None
         rows.append(row)
     df = pd.DataFrame(rows)
-    if not df.empty:
-        df = df[["section", "metric"] + labels]
+    if not df.empty: df = df[["section","metric"] + labels]
     return df, labels
 
-# ---------------------- Mapping engine ----------------------
+# ---- Mapping engine ----
 def load_mapping_constant() -> Dict[str, Any]:
     return json.loads(DEFAULT_MAPPING_JSON)
 
@@ -250,8 +199,8 @@ def match_metric(name: str, rule: Dict[str, Any], default_ci: bool) -> bool:
     ci = bool(rule.get("case_insensitive", default_ci))
     flags = re.IGNORECASE if ci else 0
     if use_regex:
-        return any(re.search(p, name, flags=flags) for p in pats)
-    return any((p.lower() == name.lower()) if ci else (p == name) for p in pats)
+        return any(re.search(p, name, flags=flags) for p in pats)  # substring-friendly
+    return any((p.lower()==name.lower()) if ci else (p==name) for p in pats)
 
 def section_allowed(section: Optional[str], rule: Dict[str, Any]) -> bool:
     allowed = rule.get("sections", ["*"])
@@ -263,33 +212,23 @@ def section_allowed(section: Optional[str], rule: Dict[str, Any]) -> bool:
 def apply_mapping(df: pd.DataFrame, labels: List[str], mapping: Dict[str, Any]) -> pd.DataFrame:
     if df.empty: return pd.DataFrame()
     for lab in labels:
-        if lab in df.columns:
-            df[lab] = pd.to_numeric(df[lab], errors="coerce")
+        if lab in df.columns: df[lab] = pd.to_numeric(df[lab], errors="coerce")
     ci_default = bool(mapping.get("case_insensitive", False))
     outputs: List[pd.DataFrame] = []
     for idx, rule in enumerate(mapping.get("metrics", []), start=1):
         label = rule.get("label", f"Rule {idx}")
-        agg_mode = (rule.get("section_aggregate") or "sum").lower()
         mask = df.apply(lambda r: match_metric(r["metric"], rule, ci_default) and section_allowed(r["section"], rule), axis=1)
         matched = df[mask].copy()
-        if matched.empty:
-            totals = pd.Series({c: 0 for c in labels})
-            agg = pd.DataFrame([totals]); agg.insert(0, "label", label)
-            outputs.append(agg); continue
         use_cols = [c for c in labels if c in matched.columns]
-        if agg_mode == "by_section":
-            agg = matched.groupby(["section"], dropna=False)[use_cols].sum(min_count=1).reset_index()
-            agg.insert(0, "label", label)
+        if matched.empty:
+            totals = pd.Series({c: 0 for c in use_cols})
+            agg = pd.DataFrame([totals]); agg.insert(0, "label", label)
         else:
             totals = matched[use_cols].sum(min_count=1)
             agg = pd.DataFrame([totals]); agg.insert(0, "label", label)
         outputs.append(agg)
-    if not outputs:
-        return pd.DataFrame(columns=["label"] + labels)
-    out = pd.concat(outputs, ignore_index=True)
-    id_cols = ["label"] + (["section"] if "section" in out.columns else [])
-    value_cols = [c for c in out.columns if c not in id_cols]
-    out = out.groupby(id_cols, dropna=False)[value_cols].sum(min_count=1).reset_index()
+    out = pd.concat(outputs, ignore_index=True) if outputs else pd.DataFrame(columns=["label"] + labels)
+    out = out.groupby(["label"], dropna=False).sum(min_count=1).reset_index()
     ordered = ["label"] + [c for c in labels if c in out.columns]
     return out[ordered]
 
@@ -299,15 +238,11 @@ def pick_latest_period_label(labels: List[str]) -> Optional[str]:
     def key(lbl: str) -> int:
         m = re.match(r"^P(\d{1,2})_(\d{2})$", lbl)
         if not m: return -1
-        p = int(m.group(1)); y = int(m.group(2))
-        return y * 100 + p
-    scored = [(lbl, key(lbl)) for lbl in cand]
-    if all(k >= 0 for _, k in scored):
-        return max(scored, key=lambda x: x[1])[0]
-    return cand[-1]
+        return int(m.group(2))*100 + int(m.group(1))
+    return max(cand, key=key)
 
-# ---------------------- UI (no sidebar) ----------------------
-st.markdown("# Greeno's Bad Three")
+# ---- UI (no sidebar) ----
+st.markdown("# 📊 Greeno Bad Three — Scoreboard")
 st.caption("Upload the PDF, choose a period, and see totals at a glance.")
 
 pdf_file = st.file_uploader("Choose a PDF", type=["pdf"])
@@ -330,59 +265,60 @@ if df_wide.empty:
 
 latest_label = pick_latest_period_label(labels) or labels[0]
 period_choices = [c for c in labels if c.lower() != "total"]
-period_cols = st.columns([1,3,8])
-with period_cols[0]:
-    st.write("**Period**")
-with period_cols[1]:
-    period_label = st.selectbox("", options=period_choices, index=period_choices.index(latest_label) if latest_label in period_choices else 0, label_visibility="collapsed")
+period_label = st.selectbox("Period", options=period_choices, index=period_choices.index(latest_label) if latest_label in period_choices else 0)
 
-# CSS + placeholders
+# Palette (bg, text) — 7 high-contrast gradients repeated for 21 tiles
+PALETTE: List[Tuple[str, str]] = [
+    ("linear-gradient(135deg,#ff3b30,#ff9500)", "#ffffff"),  # red→orange
+    ("linear-gradient(135deg,#0a84ff,#30d158)", "#ffffff"),  # blue→green
+    ("linear-gradient(135deg,#af52de,#5856d6)", "#ffffff"),  # purple duo
+    ("linear-gradient(135deg,#ff2d55,#ff375f)", "#ffffff"),  # pinks
+    ("linear-gradient(135deg,#5e5ce6,#64d2ff)", "#ffffff"),  # indigo→cyan
+    ("linear-gradient(135deg,#34c759,#a8e063)", "#052a0f"),  # greens
+    ("linear-gradient(135deg,#ffd60a,#ff9f0a)", "#1a1200")   # yellows
+]
+
+# Scoreboard skeleton
 st.markdown(SCOREBOARD_CSS, unsafe_allow_html=True)
 mapping_cfg = load_mapping_constant()
-rules: List[Dict[str, Any]] = mapping_cfg.get("metrics", [])
-labels_list = [r["label"] for r in rules]
-
-palette_classes = ["bg-1","bg-2","bg-3","bg-4","bg-5","bg-6","bg-7","bg-8","bg-9","bg-10"]
+metric_rules: List[Dict[str, Any]] = mapping_cfg.get("metrics", [])
+metric_labels = [r["label"] for r in metric_rules]
 
 grid = st.container()
 with grid:
     st.markdown('<div class="score-grid">', unsafe_allow_html=True)
     placeholders: Dict[str, st.delta_generator.DeltaGenerator] = {}
-    for i, lab in enumerate(labels_list):
-        cls = palette_classes[i % len(palette_classes)]
+    for idx, lab in enumerate(metric_labels):
+        bg, fg = PALETTE[idx % len(PALETTE)]
         ph = st.empty()
-        placeholders[lab] = ph
-        ph.markdown(f'''
-            <div class="score-card {cls}">
-              <div class="card-inner">
-                <div class="header-row">
-                  <div class="logo-badge">A</div>
-                  <h4 class="score-title">{lab}</h4>
-                </div>
-                <div class="loading"><span class="spinner"></span>loading…</div>
-              </div>
+        placeholders[lab] = (ph, bg, fg)
+        ph.markdown(
+            f'''
+            <div class="score-card" style="background:{bg}; color:{fg}">
+              <p class="score-title">{lab}</p>
+              <div class="loading-row"><div class="spinner"></div><div>loading…</div></div>
             </div>
-        ''', unsafe_allow_html=True)
+            ''',
+            unsafe_allow_html=True
+        )
     st.markdown('</div>', unsafe_allow_html=True)
 
 # Compute totals once
 with st.spinner("Computing totals…"):
     result_df = apply_mapping(df_wide, labels, mapping_cfg)
 
-# Fill cards
-for i, lab in enumerate(labels_list):
-    cls = palette_classes[i % len(palette_classes)]
+# Fill tiles
+for lab in metric_labels:
+    ph, bg, fg = placeholders[lab]
     val = 0
     if (not result_df.empty) and (lab in result_df["label"].values) and (period_label in result_df.columns):
         val = int(result_df.loc[result_df["label"] == lab, period_label].sum())
-    placeholders[lab].markdown(f'''
-        <div class="score-card {cls}">
-          <div class="card-inner">
-            <div class="header-row">
-              <div class="logo-badge">A</div>
-              <h4 class="score-title">{lab}</h4>
-            </div>
-            <div class="score-value">{val}</div>
-          </div>
+    ph.markdown(
+        f'''
+        <div class="score-card" style="background:{bg}; color:{fg}">
+          <p class="score-title">{lab}</p>
+          <p class="score-value">{val}</p>
         </div>
-    ''', unsafe_allow_html=True)
+        ''',
+        unsafe_allow_html=True
+    )

@@ -116,7 +116,7 @@ st.markdown("""
 /* Centered, responsive watermark */
 .bg-mark{
   position: fixed;
-  top: 14px;                 /* push down a touch so it's never clipped */
+  top: 30px;                 /* push down a touch so it's never clipped */
   left: 50%;                 /* center horizontally */
   transform: translateX(-50%);
   width: clamp(320px, 36vw, 680px);   /* scales with screen, but bounded */

@@ -296,7 +296,7 @@ CATEGORY_META = {
 
 # ---------------- Header (non-sticky) ----------------
 def render_header():
-    logo_path = "greenoosu.webp"
+    logo_path = "greenosu.webp"
     if os.path.exists(logo_path):
         with open(logo_path, "rb") as f:
             b64 = f.read()

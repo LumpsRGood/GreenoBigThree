@@ -1,27 +1,108 @@
 # path: app.py
-# Greeno Bad Three — polished scoreboard (fixed 7×3 grid, centered totals, “Roll Tide…” shimmer, non-sticky header)
+# Greeno Bad Three — 3×7 scoreboard with big numbers, centered watermark, and “Roll Tide…” shimmer
 
 from __future__ import annotations
 
-import io, os, re, json, unicodedata
+import base64
+import io
+import json
+import os
+import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
-import base64
 
-# ---------------- Page config (must be first) ----------------
+# ── Page config ────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Greeno Bad Three", page_icon="🐘", layout="wide")
 
-# ---------------- Deps ----------------
+# ── Deps ───────────────────────────────────────────────────────────────────────────
 try:
     import pdfplumber
 except Exception:
     st.error("Missing dependency: pdfplumber. Add `pdfplumber` to requirements.txt.")
     st.stop()
 
-# ---------------- Mapping (locked 21 metrics) ----------------
+# ── Appearance (single CSS injection) ──────────────────────────────────────────────
+UI_CSS = """
+<style>
+:root{
+  --tile-radius:12px; --tile-gap:10px;
+  --shadow: 0 6px 18px rgba(0,0,0,.10), 0 2px 6px rgba(0,0,0,.06);
+}
+
+/* ===== Hero header (non-sticky) ===== */
+.hero{display:flex;align-items:flex-end;gap:14px;margin:6px 0 10px 0;padding:0;}
+.hero-title{font-size:clamp(1.8rem, 3vw, 2.4rem);font-weight:900;margin:0;color:#e5e7eb;line-height:1;}
+.hero-sub{font-size:.95rem;color:#cbd5e1;opacity:.85;margin-top:2px}
+
+/* Centered, fixed background watermark (stays behind content) */
+.bg-mark{
+  position: fixed;
+  top: 50px;                 /* tuned and 'locked in' */
+  left: 50%;
+  transform: translateX(-50%);
+  width: clamp(520px, 56vw, 1100px);
+  max-height: 46vh;
+  opacity: .16;
+  filter: brightness(1.1) saturate(1.05) contrast(1.1) drop-shadow(0 6px 16px rgba(0,0,0,.25));
+  z-index: 0;
+  pointer-events: none;
+}
+.bg-mark img{display:block;width:100%;height:auto;object-fit:contain;border-radius:12px;}
+/* Lift app content above watermark */
+[data-testid="stAppViewContainer"] .main .block-container{position:relative;z-index:1}
+
+/* ===== Row headers ===== */
+.row-header{display:flex;align-items:center;gap:8px;height:32px;margin:10px 0 8px 0;}
+.swatch{width:12px;height:12px;border-radius:4px;box-shadow:inset 0 0 0 1px rgba(255,255,255,.25);}
+.row-title{font-size:.95rem;font-weight:700;margin:0;color:#e5e7eb;}
+
+/* ===== Grid (exactly 7 columns; squares) ===== */
+.row-inner{display:grid;grid-template-columns:repeat(7, minmax(110px, 1fr));gap:var(--tile-gap);}
+@media (max-width:1100px){ .row-wrap{overflow-x:auto;padding-bottom:2px;} .row-inner{min-width:900px;} }
+
+.tile{position:relative;width:100%;aspect-ratio:1/1;border-radius:var(--tile-radius);overflow:hidden;box-shadow:var(--shadow);}
+.tile-inner{position:absolute;inset:0;display:grid;grid-template-rows:auto 1fr;padding:10px 12px;}
+.title-small{
+  font-size:.72rem; font-weight:800; margin:0 0 2px 0; color:#fff; opacity:.92;
+  text-shadow:0 1px 2px rgba(0,0,0,.18);
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+}
+.value-wrap{display:flex;align-items:center;justify-content:center;padding-top:4px;}
+/* BIG, prominent numerals */
+.value{
+  font-weight:1000; line-height:1; letter-spacing:-0.4px; font-variant-numeric:tabular-nums;
+  font-size: clamp(4.4rem, 11vw, 8rem);
+  -webkit-text-stroke:1px rgba(0,0,0,.15);
+  text-shadow:0 2px 6px rgba(0,0,0,.25), 0 0 1px rgba(255,255,255,.25);
+}
+
+/* Inner border to reduce banding & hover */
+.tile::after{content:"";position:absolute;inset:0;border-radius:var(--tile-radius);box-shadow:inset 0 0 0 1px rgba(255,255,255,.12);pointer-events:none;}
+.tile:hover{box-shadow:0 10px 22px rgba(0,0,0,.14), 0 4px 10px rgba(0,0,0,.08);}
+
+/* Shimmer with 'Roll Tide…' */
+.skel{position:relative;width:78%;max-width:280px;height:1.6em;border-radius:10px;opacity:.95;
+  background:linear-gradient(90deg, rgba(255,255,255,.14) 25%, rgba(255,255,255,.32) 37%, rgba(255,255,255,.14) 63%);
+  background-size:400% 100%;animation:shimmer 1.3s linear infinite;}
+.skel-text{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  font-weight:700;font-size:1.1rem;opacity:.9;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.28);}
+@keyframes shimmer {0%{background-position:100% 0}100%{background-position:-100% 0}}
+@media (prefers-reduced-motion: reduce){ .skel{animation:none;background:rgba(255,255,255,.18);} }
+
+/* Category gradients */
+.bg-missing{background:linear-gradient(135deg,#155e75,#22d3ee);}
+.bg-attitude{background:linear-gradient(135deg,#3730a3,#818cf8);}
+.bg-other{background:linear-gradient(135deg,#334155,#64748b);}
+.fg-light{color:#ffffff;}
+</style>
+"""
+st.markdown(UI_CSS, unsafe_allow_html=True)
+
+# ── Mapping (locked 21 metrics) ────────────────────────────────────────────────────
 DEFAULT_MAPPING_JSON = r"""
 {
   "case_insensitive": true,
@@ -53,135 +134,27 @@ DEFAULT_MAPPING_JSON = r"""
 }
 """
 
-# ---------------- Appearance (CSS) ----------------
-UI_CSS = """
-<style>
-:root{
-  --tile-radius:12px; --tile-gap:10px;
-  --shadow: 0 6px 18px rgba(0,0,0,.10), 0 2px 6px rgba(0,0,0,.06);
-}
+# ── Header (hero + centered watermark) ─────────────────────────────────────────────
+def render_header() -> None:
+    if os.path.exists("greenoosu.webp"):
+        with open("greenoosu.webp", "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("utf-8")
+        st.markdown(
+            f"<div class='bg-mark'><img src='data:image/webp;base64,{b64}' alt='Greeno watermark'/></div>",
+            unsafe_allow_html=True
+        )
+    st.markdown(
+        """
+        <div class="hero">
+          <h1 class="hero-title">Greeno Bad Three</h1>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
-/* ===== Hero header (non-sticky) ===== */
-.hero{display:flex;align-items:flex-end;gap:14px;margin:4px 0 10px 0;padding:0;}
-.hero-title{font-size:clamp(1.8rem, 3vw, 2.4rem);font-weight:900;margin:0;color:#e5e7eb;line-height:1;}
-.hero-sub{font-size:.95rem;color:#cbd5e1;opacity:.85;margin-top:2px}
+render_header()
 
-/* Fixed background watermark (stays put while scrolling) */
-.bg-mark{position:fixed;top:18px;left:18px;width:min(9vw, 220px);opacity:.10;
-  filter:saturate(1) contrast(1.05);z-index:0;pointer-events:none;}
-/* Lift app content above the watermark */
-[data-testid="stAppViewContainer"] .main .block-container{position:relative;z-index:1}
-
-/* ===== Row headers ===== */
-.row-header{display:flex;align-items:center;gap:8px;height:32px;margin:10px 0 8px 0;}
-.swatch{width:12px;height:12px;border-radius:4px;box-shadow:inset 0 0 0 1px rgba(255,255,255,.25);}
-.row-title{font-size:.95rem;font-weight:700;margin:0;color:#e5e7eb;}
-
-/* ===== Grid (exactly 7 columns) ===== */
-.row-inner{display:grid;grid-template-columns:repeat(7, minmax(110px, 1fr));gap:var(--tile-gap);}
-@media (max-width:1100px){ .row-wrap{overflow-x:auto;padding-bottom:2px;} .row-inner{min-width:900px;} }
-
-/* ===== Tiles (square) ===== */
-.tile{position:relative;width:100%;aspect-ratio:1/1;border-radius:var(--tile-radius);overflow:hidden;box-shadow:var(--shadow);}
-.tile-inner{position:absolute;inset:0;display:grid;grid-template-rows:auto 1fr;padding:10px 12px;}
-.title-small{font-size:.78rem;font-weight:800;margin:0;color:#fff;opacity:.98;text-shadow:0 1px 2px rgba(0,0,0,.18);
-  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
-.value-wrap{display:flex;align-items:center;justify-content:center;}
-.value{font-weight:900;line-height:1;margin:0;letter-spacing:-0.3px;font-variant-numeric:tabular-nums;
-  font-size:clamp(2.6rem, 5.8vw, 3.6rem);text-shadow:0 2px 4px rgba(0,0,0,.22);}
-
-/* Inner border to reduce banding & hover */
-.tile::after{content:"";position:absolute;inset:0;border-radius:var(--tile-radius);box-shadow:inset 0 0 0 1px rgba(255,255,255,.12);pointer-events:none;}
-.tile:hover{box-shadow:0 10px 22px rgba(0,0,0,.14), 0 4px 10px rgba(0,0,0,.08);}
-
-/* Shimmer with 'Roll Tide…' */
-.skel{position:relative;width:78%;max-width:280px;height:1.6em;border-radius:10px;opacity:.95;
-  background:linear-gradient(90deg, rgba(255,255,255,.14) 25%, rgba(255,255,255,.32) 37%, rgba(255,255,255,.14) 63%);
-  background-size:400% 100%;animation:shimmer 1.3s linear infinite;}
-.skel-text{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
-  font-weight:700;font-size:1.1rem;opacity:.9;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.28);}
-@keyframes shimmer {0%{background-position:100% 0}100%{background-position:-100% 0}}
-@media (prefers-reduced-motion: reduce){ .skel{animation:none;background:rgba(255,255,255,.18);} }
-
-/* Category gradients */
-.bg-missing{background:linear-gradient(135deg,#155e75,#22d3ee);}
-.bg-attitude{background:linear-gradient(135deg,#3730a3,#818cf8);}
-.bg-other{background:linear-gradient(135deg,#334155,#64748b);}
-.fg-light{color:#ffffff;}
-</style>
-"""
-st.markdown(UI_CSS, unsafe_allow_html=True)
-st.markdown("""
-<style>
-/* Bigger centered watermark */
-.bg-mark{
-  position: fixed;
-  top: 50px;                 /* you already set this */
-  left: 50%;
-  transform: translateX(-50%);
-  /* ↑ Increase both width and max-height to grow the image */
-  width: clamp(520px, 56vw, 1100px);   /* was 36vw — try 56vw & raise the upper cap */
-  max-height: 46vh;                    /* was 34vh — allow almost half the viewport height */
-  opacity: .16;
-  filter: brightness(1.1) saturate(1.05) contrast(1.1)
-          drop-shadow(0 6px 16px rgba(0,0,0,.25));
-  z-index: 0;
-  pointer-events: none;
-}
-.bg-mark img{
-  display:block;
-  width:100%;
-  height:auto;
-  object-fit: contain;       /* prevents any cropping */
-  border-radius: 12px;
-}
-
-/* Mobile/tablet tuning so it still fits */
-@media (max-width: 900px){
-  .bg-mark{
-    top: 20px;
-    width: clamp(300px, 76vw, 640px);
-    max-height: 40vh;
-    opacity: .18;
-  }
-}
-</style>
-st.markdown("""
-<style>
-/* Bigger, bolder, higher-contrast numerals */
-.value{
-  font-size: clamp(3.6rem, 9.2vw, 6.6rem);  /* was ~2.6–3.6rem */
-  font-weight: 1000;
-  letter-spacing: -0.4px;
-  line-height: 1;
-  /* soft outline + glow for readability on any gradient */
-  -webkit-text-stroke: 1px rgba(0,0,0,.15);
-  text-shadow:
-     0 2px 6px rgba(0,0,0,.25),
-     0 0 1px rgba(255,255,255,.25);
-}
-
-/* Let the number breathe by reducing internal padding */
-.tile-inner{ padding: 8px 10px; }
-
-/* Make the label a touch smaller so the number dominates */
-.title-small{
-  font-size: .72rem;         /* was .78rem */
-  opacity: .92;
-  margin-bottom: 2px;
-  -webkit-line-clamp: 2;     /* still clamps to two lines */
-}
-
-/* Slightly more space for the number vertically */
-.value-wrap{
-  align-items: center;
-  justify-content: center;
-  padding-top: 4px;
-}
-</style>
-""", unsafe_allow_html=True)
-
-# ---------------- Extraction / cleaning ----------------
+# ── Extraction / cleaning ──────────────────────────────────────────────────────────
 @dataclass
 class ExtractConfig:
     normalize_unicode: bool = True
@@ -225,7 +198,7 @@ def remove_page_numbers(text: str) -> str:
         keep.append(ln)
     return "\n".join(keep)
 
-# ---------------- Parser (rows ending with 14 numbers) ----------------
+# ── Parser (rows ending with 14 numbers) ───────────────────────────────────────────
 SECTION_ALIASES = {
     "delivery":"Delivery","dine in":"Dine-In","dine-in":"Dine-In",
     "carryout":"Carryout","carry out":"Carryout","takeout":"Takeout",
@@ -243,12 +216,13 @@ def extract_period_labels(text: str, expected: int = 14) -> List[str]:
             parts = re.findall(r"P\d{1,2}\s+\d{2}", ln)
             if len(parts) >= expected-1:
                 labs = [p.replace(" ","_") for p in parts[:expected-1]]
-                labs.append("Total"); return labs
+                labs.append("Total")
+                return labs
     return [f"col{i:02d}" for i in range(1, expected+1)]
 
 def metric_line_pattern(ncols: int = 14) -> re.Pattern:
     nums = r"\s+".join([fr"(?P<c{i:02d}>\d+)" for i in range(1, ncols+1)])
-    return re.compile(fr"^(?P<metric>[A-Za-z][A-Za-z0-9/'&()\-\s]+?)\s*:?\s+{nums}\s*$")
+    return re.compile(fr"^(?P<metric>[A-Za-z][A-Za-z0-9/'&()\- ]+?)\s*:?\s+{nums}\s*$")
 
 def parse_matrix_blocks(text: str, ncols: int = 14) -> Tuple[pd.DataFrame, List[str]]:
     labels = extract_period_labels(text, expected=ncols)
@@ -274,7 +248,7 @@ def parse_matrix_blocks(text: str, ncols: int = 14) -> Tuple[pd.DataFrame, List[
     if not df.empty: df = df[["section","metric"] + labels]
     return df, labels
 
-# ---------------- Mapping engine ----------------
+# ── Mapping engine ─────────────────────────────────────────────────────────────────
 def load_mapping_constant() -> Dict[str, Any]:
     return json.loads(DEFAULT_MAPPING_JSON)
 
@@ -284,7 +258,7 @@ def match_metric(name: str, rule: Dict[str, Any], default_ci: bool) -> bool:
     use_regex = bool(rule.get("regex", False))
     ci = bool(rule.get("case_insensitive", default_ci))
     flags = re.IGNORECASE if ci else 0
-    if use_regex:
+    if use_regex:  # crucial: regex search allows fragments
         return any(re.search(p, name, flags=flags) for p in pats)
     return any((p.lower()==name.lower()) if ci else (p==name) for p in pats)
 
@@ -298,7 +272,8 @@ def section_allowed(section: Optional[str], rule: Dict[str, Any]) -> bool:
 def apply_mapping(df: pd.DataFrame, labels: List[str], mapping: Dict[str, Any]) -> pd.DataFrame:
     if df.empty: return pd.DataFrame()
     for lab in labels:
-        if lab in df.columns: df[lab] = pd.to_numeric(df[lab], errors="coerce")
+        if lab in df.columns:
+            df[lab] = pd.to_numeric(df[lab], errors="coerce")
     ci_default = bool(mapping.get("case_insensitive", False))
     outputs: List[pd.DataFrame] = []
     for idx, rule in enumerate(mapping.get("metrics", []), start=1):
@@ -327,7 +302,18 @@ def pick_latest_period_label(labels: List[str]) -> Optional[str]:
         return int(m.group(2))*100 + int(m.group(1))
     return max(cand, key=key)
 
-# ---------------- Categories (7 per row) ----------------
+def compute_presence(df: pd.DataFrame, mapping: Dict[str, Any]) -> Dict[str, bool]:
+    """Track whether each metric appears in the raw PDF (so we can show '—' when absent)."""
+    if df.empty: return {}
+    ci_default = bool(mapping.get("case_insensitive", False))
+    present = {}
+    for idx, rule in enumerate(mapping.get("metrics", []), start=1):
+        label = rule.get("label", f"Rule {idx}")
+        mask = df.apply(lambda r: match_metric(r["metric"], rule, ci_default) and section_allowed(r["section"], rule), axis=1)
+        present[label] = bool(mask.any())
+    return present
+
+# ── Categories (7 per row) ─────────────────────────────────────────────────────────
 MISSING = [
     "Missing food","Order wrong","Missing condiments","Out of menu item",
     "Missing bev","Missing ingredients","Packaging to-go complaint"
@@ -343,39 +329,16 @@ OTHER = [
 ]
 CATEGORY_META = {
     "To-go Missing Complaints": {"labels": MISSING,  "bg": "bg-missing",  "swatch": "#155e75"},
-    "Attitude":                   {"labels": ATTITUDE, "bg": "bg-attitude", "swatch": "#3730a3"},
-    "Other":                      {"labels": OTHER,    "bg": "bg-other",    "swatch": "#334155"}
+    "Attitude":                  {"labels": ATTITUDE, "bg": "bg-attitude", "swatch": "#3730a3"},
+    "Other":                     {"labels": OTHER,    "bg": "bg-other",    "swatch": "#334155"}
 }
 
-# ---------------- Header (simple, non-sticky) ----------------
-def render_header():
-    # Background watermark (fixed)
-    if os.path.exists("greenoosu.webp"):
-        with open("greenoosu.webp", "rb") as f:
-            b64 = base64.b64encode(f.read()).decode("utf-8")
-        st.markdown(
-            f"<div class='bg-mark'><img src='data:image/webp;base64,{b64}' alt='Greeno watermark'/></div>",
-            unsafe_allow_html=True
-        )
-
-    # Compact hero title (no inline image; watermark handles the brand)
-    st.markdown(
-        """
-        <div class="hero">
-          <h1 class="hero-title">Greeno Bad Three</h1>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-
-render_header()
-
-# ---------------- Upload + period UI ----------------
+# ── Upload ─────────────────────────────────────────────────────────────────────────
 pdf_file = st.file_uploader("Upload PDF report", type=["pdf"])
 if not pdf_file:
     st.stop()
 
-# Row placeholders (entire row at once to preserve grid)
+# ── Pre-render rows with shimmer (single call per row keeps grid intact) ───────────
 row_ph: Dict[str, st.delta_generator.DeltaGenerator] = {title: st.empty() for title in CATEGORY_META.keys()}
 
 def render_row_html(title: str, bg_class: str, swatch_hex: str, items: List[Tuple[str, Optional[int]]], loading: bool) -> str:
@@ -404,12 +367,13 @@ def render_row_html(title: str, bg_class: str, swatch_hex: str, items: List[Tupl
       </div>
     """
 
-# Initial shimmer rows
+st.markdown("### Scoreboard")
 for title, meta in CATEGORY_META.items():
     items = [(lab, None) for lab in meta["labels"]]
-    row_ph[title].markdown(render_row_html(title, meta["bg"], meta["swatch"], items, loading=True), unsafe_allow_html=True)
+    row_ph[title].markdown(render_row_html(title, meta["bg"], meta["swatch"], items, loading=True),
+                           unsafe_allow_html=True)
 
-# ---------------- Parse + aggregate ----------------
+# ── Parse + aggregate ──────────────────────────────────────────────────────────────
 cfg = ExtractConfig()
 with st.spinner("Parsing PDF and computing totals…"):
     raw = io.BytesIO(pdf_file.read())
@@ -420,12 +384,14 @@ with st.spinner("Parsing PDF and computing totals…"):
     df_wide, labels = parse_matrix_blocks(txt, ncols=14)
 
 if df_wide.empty:
-    st.error("No matrix rows matched. Make sure rows end with 14 numbers and the header line contains the period labels.")
+    st.error("No matrix rows matched. Ensure the header line contains period labels and rows end with 14 numbers.")
     st.stop()
 
 mapping_cfg = load_mapping_constant()
 result_df = apply_mapping(df_wide, labels, mapping_cfg)
+present_map = compute_presence(df_wide, mapping_cfg)
 
+# ── Period selection (default: latest) ─────────────────────────────────────────────
 period_choices = [c for c in labels if c.lower() != "total"]
 latest = pick_latest_period_label(labels) or (period_choices[-1] if period_choices else None)
 sel_idx = period_choices.index(latest) if latest in period_choices else 0
@@ -434,9 +400,12 @@ period_label = st.selectbox("Period", options=period_choices, index=sel_idx)
 def val_for(metric_label: str, period: str) -> Optional[int]:
     if result_df.empty or (metric_label not in result_df["label"].values) or (period not in result_df.columns):
         return None
-    return int(result_df.loc[result_df["label"] == metric_label, period].sum())
+    v = int(result_df.loc[result_df["label"] == metric_label, period].sum())
+    # Show "—" if metric absent in raw (present_map False)
+    return v if present_map.get(metric_label, False) else None
 
-# Fill rows with values (single re-render per row to keep the grid intact)
+# ── Fill rows with values (one re-render per row) ─────────────────────────────────
 for title, meta in CATEGORY_META.items():
     items = [(lab, val_for(lab, period_label)) for lab in meta["labels"]]
-    row_ph[title].markdown(render_row_html(title, meta["bg"], meta["swatch"], items, loading=False), unsafe_allow_html=True)
+    row_ph[title].markdown(render_row_html(title, meta["bg"], meta["swatch"], items, loading=False),
+                           unsafe_allow_html=True)

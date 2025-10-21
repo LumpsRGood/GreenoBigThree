@@ -116,7 +116,7 @@ st.markdown("""
 /* Bigger centered watermark */
 .bg-mark{
   position: fixed;
-  top: 40px;                 /* you already set this */
+  top: 50px;                 /* you already set this */
   left: 50%;
   transform: translateX(-50%);
   /* ↑ Increase both width and max-height to grow the image */
